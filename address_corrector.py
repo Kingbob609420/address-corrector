@@ -18,6 +18,7 @@ from difflib import get_close_matches
 
 import pandas as pd
 import pycountry
+import geonamescache as _gnc
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -487,9 +488,33 @@ def correct_city(val):
     val = _clean(val)
     if not val:
         return ""
-    # Title case but keep conjunctions lowercase (e.g. "Port-au-Prince")
+
+    lower = val.lower()
+
+    # 1. Exact match in known cities → use canonical casing
+    if lower in _ALL_CITIES:
+        return _ALL_CITIES[lower]
+
+    # 2. Fuzzy match for misspellings — only for inputs ≥ 4 chars
+    if len(val) >= 4:
+        from difflib import SequenceMatcher
+        candidates = get_close_matches(lower, _ALL_CITY_NAMES, n=5, cutoff=0.78)
+        if candidates:
+            # Score: string similarity  +  small population bonus (log-scaled)
+            # This ensures Tokyo beats Toki, Paris beats Parys, etc.
+            import math
+            def _score(c):
+                sim = SequenceMatcher(None, lower, c).ratio()
+                pop = _CITY_POPULATION.get(c, 0)
+                pop_bonus = math.log10(pop + 1) * 0.045  # weighted to prefer major cities
+                return sim + pop_bonus
+            best = max(candidates, key=_score)
+            if SequenceMatcher(None, lower, best).ratio() >= 0.78:
+                return _ALL_CITIES[best]
+
+    # 3. Title case fallback (handles hyphens: "Port-au-Prince")
     parts = re.split(r"([-/])", val)
-    return "".join(p.title() if not p in ("-", "/") else p for p in parts)
+    return "".join(p.title() if p not in ("-", "/") else p for p in parts)
 
 
 def correct_state(val, country_hint=""):
@@ -498,27 +523,31 @@ def correct_state(val, country_hint=""):
         return ""
     lower = val.lower()
 
-    # Try US state full name → abbreviation
+    # 1. Exact match → abbreviation
     if lower in US_STATES:
         return US_STATES[lower]
-
-    # Try Canadian province full name → abbreviation
     if lower in CA_PROVINCES:
         return CA_PROVINCES[lower]
-
-    # Try Australian state full name → abbreviation
     if lower in AU_STATES:
         return AU_STATES[lower]
 
-    # Pure alphabetic short codes (2–4 chars) → uppercase  (e.g. "ny", "nsw", "qld", "on")
+    # 2. Short code (2–4 alpha chars) → uppercase as-is  ("ny", "nsw", "on")
     if len(val) <= 4 and val.replace(" ", "").isalpha():
         return val.upper()
 
-    # Anything longer that looks like an abbreviation (ALL CAPS already) → keep uppercase
+    # 3. Already all-caps → keep it
     if val.isupper():
         return val
 
-    # Default: Title Case (works for any language / region name)
+    # 4. Fuzzy match against all known state / province full names
+    #    Catches misspellings: "Californnia" → CA, "Ontarrio" → ON
+    #    Only for inputs long enough that they look like full names (>4 chars)
+    if len(val) > 4:
+        hits = get_close_matches(lower, _ALL_STATE_NAMES, n=1, cutoff=0.78)
+        if hits:
+            return _STATE_FUZZY_INDEX[hits[0]]
+
+    # 5. Title Case fallback
     return val.title()
 
 
@@ -536,6 +565,53 @@ for _c in pycountry.countries:
         if _v:
             _COUNTRY_NAME_INDEX[_v.lower()] = _c
 _ALL_COUNTRY_NAMES = list(_COUNTRY_NAME_INDEX.keys())
+
+# ── State / province fuzzy index ──────────────────────────────────────────────
+# Maps lowercase full-name → canonical abbreviation for every known region.
+_STATE_FUZZY_INDEX: dict[str, str] = {}
+_STATE_FUZZY_INDEX.update({k: v for k, v in US_STATES.items()})
+_STATE_FUZZY_INDEX.update({k: v for k, v in CA_PROVINCES.items()})
+_STATE_FUZZY_INDEX.update({k: v for k, v in AU_STATES.items()})
+# Also index Indian states via pycountry subdivisions
+for _sub in pycountry.subdivisions.get(country_code="IN") or []:
+    _STATE_FUZZY_INDEX[_sub.name.lower()] = _sub.code.split("-")[-1]
+_ALL_STATE_NAMES = list(_STATE_FUZZY_INDEX.keys())
+
+# ── City fuzzy index ──────────────────────────────────────────────────────────
+# Only cities with population > 50 000 to keep matching fast and accurate.
+_gc = _gnc.GeonamesCache()
+_ALL_CITIES: dict[str, str] = {}         # lowercase → canonical Title Case name
+_CITY_POPULATION: dict[str, int] = {}    # lowercase → population (for tiebreaking)
+for _city in _gc.get_cities().values():
+    if _city["population"] > 50_000:
+        _name = _city["name"]
+        _pop  = _city["population"]
+        _key  = _name.lower()
+        # Keep the higher-population entry when names collide (e.g. multiple "Springfield")
+        if _pop > _CITY_POPULATION.get(_key, 0):
+            _ALL_CITIES[_key]      = _name
+            _CITY_POPULATION[_key] = _pop
+        # Also index name without " City" suffix  ("New York City" → "new york")
+        _alt = _name.replace(" City", "").replace(" city", "").strip()
+        if _alt and _alt.lower() != _key:
+            if _pop > _CITY_POPULATION.get(_alt.lower(), 0):
+                _ALL_CITIES[_alt.lower()]      = _name
+                _CITY_POPULATION[_alt.lower()] = _pop
+
+# Explicit common aliases not in geonamescache
+_CITY_ALIASES = {
+    "new york":    "New York City",
+    "nyc":         "New York City",
+    "la":          "Los Angeles",
+    "sf":          "San Francisco",
+    "dc":          "Washington",
+    "philly":      "Philadelphia",
+    "vegas":       "Las Vegas",
+    "nola":        "New Orleans",
+    "chi":         "Chicago",
+}
+_ALL_CITIES.update(_CITY_ALIASES)
+_ALL_CITY_NAMES = list(_ALL_CITIES.keys())
 
 
 def correct_country(val):
