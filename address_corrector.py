@@ -481,7 +481,7 @@ def correct_address_line(val):
             result.append(w.title())
         i += 1
 
-    return " ".join(result)
+    return " ".join(result).upper()
 
 
 def correct_city(val):
@@ -493,28 +493,25 @@ def correct_city(val):
 
     # 1. Exact match in known cities → use canonical casing
     if lower in _ALL_CITIES:
-        return _ALL_CITIES[lower]
+        return _ALL_CITIES[lower].upper()
 
     # 2. Fuzzy match for misspellings — only for inputs ≥ 4 chars
     if len(val) >= 4:
         from difflib import SequenceMatcher
         candidates = get_close_matches(lower, _ALL_CITY_NAMES, n=5, cutoff=0.78)
         if candidates:
-            # Score: string similarity  +  small population bonus (log-scaled)
-            # This ensures Tokyo beats Toki, Paris beats Parys, etc.
             import math
             def _score(c):
                 sim = SequenceMatcher(None, lower, c).ratio()
                 pop = _CITY_POPULATION.get(c, 0)
-                pop_bonus = math.log10(pop + 1) * 0.045  # weighted to prefer major cities
+                pop_bonus = math.log10(pop + 1) * 0.045
                 return sim + pop_bonus
             best = max(candidates, key=_score)
             if SequenceMatcher(None, lower, best).ratio() >= 0.78:
-                return _ALL_CITIES[best]
+                return _ALL_CITIES[best].upper()
 
-    # 3. Title case fallback (handles hyphens: "Port-au-Prince")
-    parts = re.split(r"([-/])", val)
-    return "".join(p.title() if p not in ("-", "/") else p for p in parts)
+    # 3. Fallback — all caps
+    return val.upper()
 
 
 def correct_state(val, country_hint=""):
@@ -523,7 +520,7 @@ def correct_state(val, country_hint=""):
         return ""
     lower = val.lower()
 
-    # 1. Exact match → abbreviation
+    # 1. Exact match → abbreviation (already uppercase by definition)
     if lower in US_STATES:
         return US_STATES[lower]
     if lower in CA_PROVINCES:
@@ -531,24 +528,18 @@ def correct_state(val, country_hint=""):
     if lower in AU_STATES:
         return AU_STATES[lower]
 
-    # 2. Short code (2–4 alpha chars) → uppercase as-is  ("ny", "nsw", "on")
+    # 2. Short code (2–4 alpha chars) → uppercase
     if len(val) <= 4 and val.replace(" ", "").isalpha():
         return val.upper()
 
-    # 3. Already all-caps → keep it
-    if val.isupper():
-        return val
-
-    # 4. Fuzzy match against all known state / province full names
-    #    Catches misspellings: "Californnia" → CA, "Ontarrio" → ON
-    #    Only for inputs long enough that they look like full names (>4 chars)
+    # 3. Fuzzy match against all known state / province full names
     if len(val) > 4:
         hits = get_close_matches(lower, _ALL_STATE_NAMES, n=1, cutoff=0.78)
         if hits:
             return _STATE_FUZZY_INDEX[hits[0]]
 
-    # 5. Title Case fallback
-    return val.title()
+    # 4. Fallback — all caps
+    return val.upper()
 
 
 def _pycountry_name(c):
@@ -625,21 +616,21 @@ def correct_country(val):
 
     # 1. Manual alias map — fastest; handles abbreviations & native names
     if lookup in COUNTRY_MAP:
-        return COUNTRY_MAP[lookup]
+        return COUNTRY_MAP[lookup].upper()
     if no_dots in COUNTRY_MAP:
-        return COUNTRY_MAP[no_dots]
+        return COUNTRY_MAP[no_dots].upper()
 
     # 2. ISO alpha-2 code  (e.g. "DE", "JP", "au")
     if len(stripped) == 2 and stripped.isalpha():
         c = pycountry.countries.get(alpha_2=stripped.upper())
         if c:
-            return _pycountry_name(c)
+            return _pycountry_name(c).upper()
 
     # 3. ISO alpha-3 code  (e.g. "DEU", "aus", "GBR")
     if len(stripped) == 3 and stripped.isalpha():
         c = pycountry.countries.get(alpha_3=stripped.upper())
         if c:
-            return _pycountry_name(c)
+            return _pycountry_name(c).upper()
 
     # 4. Exact ISO name / common_name / official_name match
     for attr, query in [
@@ -650,24 +641,23 @@ def correct_country(val):
     ]:
         c = pycountry.countries.get(**{attr: query})
         if c:
-            return _pycountry_name(c)
+            return _pycountry_name(c).upper()
 
     # 5. pycountry token search
     try:
         results = pycountry.countries.search_fuzzy(val)
         if results:
-            return _pycountry_name(results[0])
+            return _pycountry_name(results[0]).upper()
     except LookupError:
         pass
 
     # 6. difflib edit-distance fuzzy match over all 249 country names
-    #    Catches misspellings: "Austrailia", "Germny", "Unted Kingdom"
     hits = get_close_matches(lookup, _ALL_COUNTRY_NAMES, n=1, cutoff=0.72)
     if hits:
-        return _pycountry_name(_COUNTRY_NAME_INDEX[hits[0]])
+        return _pycountry_name(_COUNTRY_NAME_INDEX[hits[0]]).upper()
 
-    # 7. Fallback — Title Case (preserves unrecognised values cleanly)
-    return val.title()
+    # 7. Fallback — all caps
+    return val.upper()
 
 
 def correct_postal_code(val, country_hint=""):
