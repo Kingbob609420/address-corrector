@@ -17,6 +17,7 @@ import sys
 from difflib import get_close_matches
 
 import pandas as pd
+import pycountry
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -203,120 +204,136 @@ ALL_REGION_CODES = US_STATE_CODES | CA_PROVINCE_CODES | AU_STATE_CODES | {
 }
 
 # Country aliases → standardised name
+# Manual alias map — covers abbreviations, native-language names, and
+# common alternate spellings that pycountry cannot resolve on its own.
+# pycountry handles the remaining 200+ countries automatically.
 COUNTRY_MAP = {
-    # United States
+    # ── United States ──────────────────────────────────────────────────────
     "usa": "United States", "u.s.a": "United States", "u.s.a.": "United States",
     "us": "United States", "u.s.": "United States", "u.s": "United States",
     "united states of america": "United States", "america": "United States",
-    "the united states": "United States",
-    # United Kingdom
+    "the united states": "United States", "the us": "United States",
+    # ── United Kingdom ─────────────────────────────────────────────────────
     "uk": "United Kingdom", "u.k.": "United Kingdom", "u.k": "United Kingdom",
     "great britain": "United Kingdom", "gb": "United Kingdom", "g.b.": "United Kingdom",
     "england": "United Kingdom", "britain": "United Kingdom",
-    # UAE
+    "scotland": "United Kingdom", "wales": "United Kingdom",
+    "northern ireland": "United Kingdom",
+    # ── UAE ────────────────────────────────────────────────────────────────
     "uae": "United Arab Emirates", "u.a.e.": "United Arab Emirates",
     "u.a.e": "United Arab Emirates", "emirates": "United Arab Emirates",
-    # Australia
-    "aus": "Australia", "au": "Australia",
-    # Canada
-    "can": "Canada", "ca": "Canada",
-    # Germany
-    "germany": "Germany", "deutschland": "Germany", "de": "Germany",
-    # France
-    "fr": "France",
-    # Italy
-    "it": "Italy", "italia": "Italy",
-    # Spain
-    "es": "Spain", "espana": "Spain", "españa": "Spain",
-    # Netherlands
-    "nl": "Netherlands", "the netherlands": "Netherlands", "holland": "Netherlands",
-    # Belgium
-    "be": "Belgium", "belgique": "Belgium",
-    # Switzerland
-    "ch": "Switzerland", "schweiz": "Switzerland", "suisse": "Switzerland",
-    # Sweden
-    "se": "Sweden", "sverige": "Sweden",
-    # Norway
-    "no": "Norway", "norge": "Norway",
-    # Denmark
-    "dk": "Denmark", "danmark": "Denmark",
-    # Finland
-    "fi": "Finland", "suomi": "Finland",
-    # Portugal
-    "pt": "Portugal",
-    # Ireland
-    "ie": "Ireland", "republic of ireland": "Ireland", "eire": "Ireland",
-    # New Zealand
-    "nz": "New Zealand",
-    # South Africa
-    "sa": "South Africa", "rsa": "South Africa",
-    # Singapore
-    "sg": "Singapore",
-    # India
-    "in": "India", "ind": "India",
-    # China
-    "cn": "China", "prc": "China", "people's republic of china": "China",
-    "peoples republic of china": "China",
-    # Japan
-    "jp": "Japan",
-    # South Korea
-    "kr": "South Korea", "korea": "South Korea", "republic of korea": "South Korea",
-    # Brazil
-    "br": "Brazil", "brasil": "Brazil",
-    # Mexico
-    "mx": "Mexico", "mex": "Mexico",
-    # Argentina
-    "ar": "Argentina",
-    # Chile
-    "cl": "Chile",
-    # Colombia
-    "co": "Colombia",
-    # Russia
-    "ru": "Russia", "russian federation": "Russia",
-    # Turkey
-    "tr": "Turkey", "türkiye": "Turkey", "turkiye": "Turkey",
-    # Saudi Arabia
+    # ── Germany ────────────────────────────────────────────────────────────
+    "deutschland": "Germany", "allemagne": "Germany", "almanya": "Germany",
+    # ── France ─────────────────────────────────────────────────────────────
+    "frankreich": "France", "frankrig": "France",
+    # ── Italy ──────────────────────────────────────────────────────────────
+    "italia": "Italy", "italie": "Italy", "italien": "Italy",
+    # ── Spain ──────────────────────────────────────────────────────────────
+    "espana": "Spain", "españa": "Spain", "espagne": "Spain", "spanien": "Spain",
+    # ── Netherlands ────────────────────────────────────────────────────────
+    "the netherlands": "Netherlands", "holland": "Netherlands",
+    "nederland": "Netherlands", "niederlande": "Netherlands",
+    # ── Belgium ────────────────────────────────────────────────────────────
+    "belgique": "Belgium", "belgien": "Belgium", "belgië": "Belgium",
+    # ── Switzerland ────────────────────────────────────────────────────────
+    "schweiz": "Switzerland", "suisse": "Switzerland", "svizzera": "Switzerland",
+    "confederazione svizzera": "Switzerland",
+    # ── Sweden ─────────────────────────────────────────────────────────────
+    "sverige": "Sweden", "schweden": "Sweden",
+    # ── Norway ─────────────────────────────────────────────────────────────
+    "norge": "Norway", "norwegen": "Norway",
+    # ── Denmark ────────────────────────────────────────────────────────────
+    "danmark": "Denmark", "dänemark": "Denmark",
+    # ── Finland ────────────────────────────────────────────────────────────
+    "suomi": "Finland", "finnland": "Finland",
+    # ── Austria ────────────────────────────────────────────────────────────
+    "österreich": "Austria", "osterreich": "Austria", "autriche": "Austria",
+    # ── Poland ─────────────────────────────────────────────────────────────
+    "polska": "Poland", "pologne": "Poland", "polen": "Poland",
+    # ── Czech Republic ─────────────────────────────────────────────────────
+    "czechia": "Czech Republic", "ceska republika": "Czech Republic",
+    "česká republika": "Czech Republic", "tschechien": "Czech Republic",
+    # ── Hungary ────────────────────────────────────────────────────────────
+    "magyarország": "Hungary", "magyarorszag": "Hungary", "hongrie": "Hungary",
+    # ── Greece ─────────────────────────────────────────────────────────────
+    "hellas": "Greece", "ellada": "Greece", "griechenland": "Greece",
+    # ── Russia ─────────────────────────────────────────────────────────────
+    "russian federation": "Russia", "rossiya": "Russia", "russland": "Russia",
+    # ── Turkey ─────────────────────────────────────────────────────────────
+    "türkiye": "Turkey", "turkiye": "Turkey", "türkei": "Turkey",
+    # ── Saudi Arabia ───────────────────────────────────────────────────────
     "ksa": "Saudi Arabia", "kingdom of saudi arabia": "Saudi Arabia",
-    # Israel
-    "il": "Israel",
-    # Poland
-    "pl": "Poland", "polska": "Poland",
-    # Czech Republic
-    "cz": "Czech Republic", "czechia": "Czech Republic",
-    # Hungary
-    "hu": "Hungary", "magyarország": "Hungary",
-    # Greece
-    "gr": "Greece", "hellas": "Greece",
-    # Romania
-    "ro": "Romania",
-    # Ukraine
-    "ua": "Ukraine",
-    # Pakistan
-    "pk": "Pakistan",
-    # Bangladesh
-    "bd": "Bangladesh",
-    # Indonesia
-    "id": "Indonesia",
-    # Malaysia
-    "my": "Malaysia",
-    # Philippines
-    "ph": "Philippines",
-    # Thailand
-    "th": "Thailand",
-    # Vietnam
-    "vn": "Vietnam",
-    # Egypt
-    "eg": "Egypt",
-    # Nigeria
-    "ng": "Nigeria",
-    # Kenya
-    "ke": "Kenya",
-    # Ghana
-    "gh": "Ghana",
-    # Morocco
-    "ma": "Morocco",
-    # Hong Kong
-    "hk": "Hong Kong",
+    "al-mamlaka al-arabiyya as-saudiyya": "Saudi Arabia",
+    # ── China ──────────────────────────────────────────────────────────────
+    "prc": "China", "people's republic of china": "China",
+    "peoples republic of china": "China", "zhongguo": "China",
+    # ── South Korea ────────────────────────────────────────────────────────
+    "korea": "South Korea", "republic of korea": "South Korea",
+    "south korea": "South Korea", "hanguk": "South Korea",
+    # ── North Korea ────────────────────────────────────────────────────────
+    "dprk": "North Korea", "north korea": "North Korea",
+    # ── Taiwan ─────────────────────────────────────────────────────────────
+    "taiwan": "Taiwan", "roc": "Taiwan", "republic of china": "Taiwan",
+    # ── Hong Kong ──────────────────────────────────────────────────────────
+    "hong kong sar": "Hong Kong", "hksar": "Hong Kong",
+    # ── Brazil ─────────────────────────────────────────────────────────────
+    "brasil": "Brazil", "brésil": "Brazil",
+    # ── Mexico ─────────────────────────────────────────────────────────────
+    "méxico": "Mexico", "mejico": "Mexico",
+    # ── Australia ──────────────────────────────────────────────────────────
+    "oz": "Australia", "aussie": "Australia",
+    # ── New Zealand ────────────────────────────────────────────────────────
+    "aotearoa": "New Zealand",
+    # ── South Africa ───────────────────────────────────────────────────────
+    "rsa": "South Africa", "suid-afrika": "South Africa",
+    # ── India ──────────────────────────────────────────────────────────────
+    "bharat": "India", "hindustan": "India",
+    # ── Pakistan ───────────────────────────────────────────────────────────
+    "pak": "Pakistan",
+    # ── Iran ───────────────────────────────────────────────────────────────
+    "persia": "Iran", "islamic republic of iran": "Iran",
+    # ── Iraq ───────────────────────────────────────────────────────────────
+    "al-iraq": "Iraq",
+    # ── Egypt ──────────────────────────────────────────────────────────────
+    "misr": "Egypt", "arab republic of egypt": "Egypt",
+    # ── Morocco ────────────────────────────────────────────────────────────
+    "maroc": "Morocco", "marruecos": "Morocco", "marokko": "Morocco",
+    # ── Algeria ────────────────────────────────────────────────────────────
+    "algérie": "Algeria", "algerie": "Algeria",
+    # ── Tunisia ────────────────────────────────────────────────────────────
+    "tunisie": "Tunisia",
+    # ── Ethiopia ───────────────────────────────────────────────────────────
+    "abyssinia": "Ethiopia",
+    # ── Ivory Coast ────────────────────────────────────────────────────────
+    "ivory coast": "Côte d'Ivoire", "cote d'ivoire": "Côte d'Ivoire",
+    "cote divoire": "Côte d'Ivoire",
+    # ── Democratic Republic of Congo ───────────────────────────────────────
+    "drc": "Congo, The Democratic Republic of the",
+    "dr congo": "Congo, The Democratic Republic of the",
+    "democratic republic of congo": "Congo, The Democratic Republic of the",
+    "zaire": "Congo, The Democratic Republic of the",
+    # ── Republic of Congo ──────────────────────────────────────────────────
+    "congo": "Congo",
+    # ── Vietnam ────────────────────────────────────────────────────────────
+    "viet nam": "Vietnam",
+    # ── Myanmar ────────────────────────────────────────────────────────────
+    "burma": "Myanmar",
+    # ── Sri Lanka ──────────────────────────────────────────────────────────
+    "ceylon": "Sri Lanka",
+    # ── Cambodia ───────────────────────────────────────────────────────────
+    "kampuchea": "Cambodia",
+    # ── Bosnia ─────────────────────────────────────────────────────────────
+    "bosnia": "Bosnia and Herzegovina", "bih": "Bosnia and Herzegovina",
+    # ── Macedonia ──────────────────────────────────────────────────────────
+    "north macedonia": "North Macedonia", "macedonia": "North Macedonia",
+    # ── Kosovo ─────────────────────────────────────────────────────────────
+    "kosovo": "Kosovo",
+    # ── Palestine ──────────────────────────────────────────────────────────
+    "palestine": "Palestine, State of",
+    # ── Vatican ────────────────────────────────────────────────────────────
+    "vatican": "Holy See", "vatican city": "Holy See",
+    # ── Macau ──────────────────────────────────────────────────────────────
+    "macau": "Macao", "macao sar": "Macao",
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -505,24 +522,75 @@ def correct_state(val, country_hint=""):
     return val.title()
 
 
+def _pycountry_name(c):
+    """Return the preferred display name for a pycountry country object."""
+    return getattr(c, "common_name", None) or c.name
+
+
+# Build a flat lookup: lowercase name variant → pycountry object
+# Used for difflib fuzzy matching (covers misspellings)
+_COUNTRY_NAME_INDEX: dict = {}
+for _c in pycountry.countries:
+    for _attr in ("name", "common_name", "official_name", "alpha_2", "alpha_3"):
+        _v = getattr(_c, _attr, None)
+        if _v:
+            _COUNTRY_NAME_INDEX[_v.lower()] = _c
+_ALL_COUNTRY_NAMES = list(_COUNTRY_NAME_INDEX.keys())
+
+
 def correct_country(val):
     val = _clean(val)
     if not val:
         return ""
-    lookup = val.lower().strip(" .")
+
+    lookup  = val.lower().strip(" .")
+    no_dots = lookup.replace(".", "")
+    stripped = no_dots.replace(" ", "")
+
+    # 1. Manual alias map — fastest; handles abbreviations & native names
     if lookup in COUNTRY_MAP:
         return COUNTRY_MAP[lookup]
-    # Try without dots  (u.s.a → usa)
-    no_dots = lookup.replace(".", "")
     if no_dots in COUNTRY_MAP:
         return COUNTRY_MAP[no_dots]
-    # 2-letter ISO country code → uppercase  (any country)
-    if len(val.replace(".", "").replace(" ", "")) == 2 and val.replace(".", "").isalpha():
-        return val.replace(".", "").upper()
-    # 3-letter ISO code → uppercase
-    if len(val.replace(".", "").replace(" ", "")) == 3 and val.replace(".", "").isalpha():
-        return val.replace(".", "").upper()
-    # Everything else → Title Case  (works for any country name in any language)
+
+    # 2. ISO alpha-2 code  (e.g. "DE", "JP", "au")
+    if len(stripped) == 2 and stripped.isalpha():
+        c = pycountry.countries.get(alpha_2=stripped.upper())
+        if c:
+            return _pycountry_name(c)
+
+    # 3. ISO alpha-3 code  (e.g. "DEU", "aus", "GBR")
+    if len(stripped) == 3 and stripped.isalpha():
+        c = pycountry.countries.get(alpha_3=stripped.upper())
+        if c:
+            return _pycountry_name(c)
+
+    # 4. Exact ISO name / common_name / official_name match
+    for attr, query in [
+        ("name",          val.title()),
+        ("common_name",   val.title()),
+        ("official_name", val.title()),
+        ("name",          val.upper()),
+    ]:
+        c = pycountry.countries.get(**{attr: query})
+        if c:
+            return _pycountry_name(c)
+
+    # 5. pycountry token search
+    try:
+        results = pycountry.countries.search_fuzzy(val)
+        if results:
+            return _pycountry_name(results[0])
+    except LookupError:
+        pass
+
+    # 6. difflib edit-distance fuzzy match over all 249 country names
+    #    Catches misspellings: "Austrailia", "Germny", "Unted Kingdom"
+    hits = get_close_matches(lookup, _ALL_COUNTRY_NAMES, n=1, cutoff=0.72)
+    if hits:
+        return _pycountry_name(_COUNTRY_NAME_INDEX[hits[0]])
+
+    # 7. Fallback — Title Case (preserves unrecognised values cleanly)
     return val.title()
 
 
