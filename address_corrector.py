@@ -478,11 +478,21 @@ UNIT_TYPES = {
 # CORRECTION FUNCTIONS
 # ──────────────────────────────────────────────────────────────────────────────
 
+_NULL_PLACEHOLDERS = {
+    "", "nan", "NaN", "None", "none", "null", "NULL", "Null",
+    "<null>", "<Null>", "<NULL>", "<none>", "<None>", "<NONE>",
+    "n/a", "N/A", "na", "NA", "<n/a>", "<N/A>",
+    "nil", "NIL", "undefined", "UNDEFINED", "#N/A", "-",
+}
+
 def _clean(val):
-    """Strip and collapse internal whitespace."""
-    if pd.isna(val) or str(val).strip() in ("", "nan", "NaN", "None", "none"):
+    """Strip and collapse internal whitespace; treat null-like placeholders as empty."""
+    if pd.isna(val):
         return ""
-    return re.sub(r"\s+", " ", str(val).strip())
+    s = str(val).strip()
+    if s in _NULL_PLACEHOLDERS:
+        return ""
+    return re.sub(r"\s+", " ", s)
 
 
 def _normalise_po_box(val):
@@ -1030,7 +1040,9 @@ def process_file(input_path, output_path):
             # Use the corrected postal if available, else fall back to original
             postal  = str(row.get(corr_postal) or row.get(postal_col) or "").strip()
             country = str(row.get(corr_country) or "").strip()
-            state   = str(row.get(corr_state)   or "").strip() if corr_state in row.index else ""
+            raw_state = str(row.get(corr_state) or "").strip() if corr_state in row.index else ""
+            # Treat null-placeholder strings (e.g. "<NULL>", "N/A") as empty
+            state = "" if raw_state.upper() in {s.upper() for s in _NULL_PLACEHOLDERS} else raw_state
 
             inferred_country = detect_country_from_postal(postal)
 
