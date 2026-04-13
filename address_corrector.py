@@ -727,32 +727,51 @@ def correct_postal_code(val, country_hint=""):
     if not val:
         return ""
 
-    # Remove surrounding quotes/spaces
     val = val.strip("'\"")
-    stripped = val.replace(" ", "")
+    stripped = val.replace(" ", "").upper()
 
-    # Pure numeric postal code — remove spaces, keep leading zeros
-    if stripped.isdigit():
-        return stripped
+    # ── Canadian postal code ────────────────────────────────────────────────
+    # Format: A1A 1A1  (positions 0,2,3 are letters; 1,4,5 are digits)
+    # Canadian codes never use D, F, I, O, Q, U — fix common I→1, O→0 OCR errors
+    ca_raw = re.match(r"^([A-Za-z][0-9OoIi][A-Za-z])\s*([0-9OoIi][A-Za-z][0-9OoIi])$",
+                      stripped)
+    if ca_raw:
+        def _fix_ca(s):
+            # Positions that must be digits: index 1, 3, 5 (in compact form)
+            s = list(s.replace(" ", "").upper())
+            digit_pos = {1, 3, 5}
+            for i in digit_pos:
+                if i < len(s):
+                    s[i] = s[i].replace("I", "1").replace("O", "0")
+            return "".join(s)
+        fixed = _fix_ca(stripped)
+        return f"{fixed[:3]} {fixed[3:]}"
 
-    # US ZIP+4 format  e.g. "12345 - 6789" → "12345-6789"
+    # ── US ZIP+4 — valid 5+4 format ────────────────────────────────────────
     zip4 = re.match(r"^(\d{5})\s*[-–]\s*(\d{4})$", val)
     if zip4:
         return f"{zip4.group(1)}-{zip4.group(2)}"
 
-    # Canadian postal code  A1A1A1 or A1A 1A1 → A1A 1A1
-    ca_match = re.match(r"^([A-Za-z]\d[A-Za-z])\s*(\d[A-Za-z]\d)$", stripped)
-    if ca_match:
-        return f"{ca_match.group(1).upper()} {ca_match.group(2).upper()}"
+    # ── Malformed US ZIP — 5+5 digits (PO Box merged with ZIP) ─────────────
+    # e.g. "91117-26001" or "48278-78001" → keep only the 5-digit ZIP
+    zip5plus = re.match(r"^(\d{5})[-–]\d{5,}$", val)
+    if zip5plus:
+        return zip5plus.group(1)
 
-    # UK postcode — ensure space before last 3 chars if missing
-    uk_match = re.match(
-        r"^([A-Za-z]{1,2}\d[A-Za-z\d]?)\s*(\d[A-Za-z]{2})$", stripped
-    )
+    # ── Pure numeric — strip spaces, preserve leading zeros ────────────────
+    if stripped.isdigit():
+        return stripped
+
+    # ── UK postcode — ensure single space before inward code ───────────────
+    uk_match = re.match(r"^([A-Z]{1,2}\d[A-Z\d]?)\s*(\d[A-Z]{2})$", stripped)
     if uk_match:
-        return f"{uk_match.group(1).upper()} {uk_match.group(2).upper()}"
+        return f"{uk_match.group(1)} {uk_match.group(2)}"
 
-    # Alphanumeric — uppercase
+    # ── Netherlands 1234AB → 1234 AB ───────────────────────────────────────
+    nl_match = re.match(r"^(\d{4})([A-Z]{2})$", stripped)
+    if nl_match:
+        return f"{nl_match.group(1)} {nl_match.group(2)}"
+
     return val.upper()
 
 
@@ -782,12 +801,46 @@ def detect_country_from_postal(postal: str) -> str | None:
     if not postal:
         return None
     p = postal.strip().upper().replace(" ", "")
-    # Re-insert space for patterns that need it
     p_spaced = postal.strip().upper()
     for pattern, country in _POSTAL_PATTERNS:
         if pattern.match(p) or pattern.match(p_spaced):
             return country
     return None
+
+
+# ── Canadian FSA (Forward Sortation Area) → Province ─────────────────────────
+# The first letter of a Canadian postal code uniquely identifies the province.
+_CA_FSA_PROVINCE: dict[str, str] = {
+    "A": "NL",   # Newfoundland and Labrador
+    "B": "NS",   # Nova Scotia
+    "C": "PE",   # Prince Edward Island
+    "E": "NB",   # New Brunswick
+    "G": "QC",   # Quebec (east)
+    "H": "QC",   # Quebec (Montreal)
+    "J": "QC",   # Quebec (west)
+    "K": "ON",   # Ontario (east)
+    "L": "ON",   # Ontario (central)
+    "M": "ON",   # Ontario (Toronto)
+    "N": "ON",   # Ontario (southwest)
+    "P": "ON",   # Ontario (north)
+    "R": "MB",   # Manitoba
+    "S": "SK",   # Saskatchewan
+    "T": "AB",   # Alberta
+    "V": "BC",   # British Columbia
+    "X": "NT",   # Northwest Territories / Nunavut
+    "Y": "YT",   # Yukon
+}
+
+# US state codes — used to detect when a US state has been listed for a Canadian address
+_US_STATE_CODES = set(US_STATES.values())
+
+
+def infer_province_from_canadian_postal(postal: str) -> str | None:
+    """Return the 2-letter Canadian province code from a postal code's FSA letter."""
+    if not postal:
+        return None
+    first = postal.strip().upper()[0]
+    return _CA_FSA_PROVINCE.get(first)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -963,20 +1016,45 @@ def process_file(input_path, output_path):
         result[label] = df[orig_col].apply(CORRECTORS[field])
         corrected_col_map[label] = label
 
-    # ── Auto-fix country using postal code evidence ────────────────────────
-    postal_col   = col_map.get("postal_code")
-    country_col  = col_map.get("country")
+    # ── Auto-fix country & state using postal code evidence ───────────────
+    postal_col  = col_map.get("postal_code")
+    country_col = col_map.get("country")
+    state_col   = col_map.get("state")
     corr_country = "Corrected Country"
+    corr_state   = "Corrected State"
     corr_postal  = "Corrected Postal Code"
-    if postal_col and country_col and corr_country in result.columns:
-        def _fix_country(row):
-            postal   = str(row.get(corr_postal, row.get(postal_col, ""))).strip()
-            current  = str(row.get(corr_country, "")).strip()
-            inferred = detect_country_from_postal(postal)
-            if inferred and inferred != current:
-                return inferred
-            return current
-        result[corr_country] = result.apply(_fix_country, axis=1)
+
+    if postal_col and corr_country in result.columns:
+
+        def _fix_country_and_state(row):
+            # Use the corrected postal if available, else fall back to original
+            postal  = str(row.get(corr_postal) or row.get(postal_col) or "").strip()
+            country = str(row.get(corr_country) or "").strip()
+            state   = str(row.get(corr_state)   or "").strip() if corr_state in row.index else ""
+
+            inferred_country = detect_country_from_postal(postal)
+
+            # Override country if postal code gives a confident answer
+            if inferred_country and inferred_country != country:
+                country = inferred_country
+
+            # If country is CA, infer province from postal FSA
+            if country == "CA":
+                inferred_province = infer_province_from_canadian_postal(postal)
+                if inferred_province:
+                    # Override state if it is null, empty, or a US state code
+                    if not state or state in _US_STATE_CODES:
+                        state = inferred_province
+
+            return pd.Series({corr_country: country, corr_state: state})
+
+        fixed = result.apply(_fix_country_and_state, axis=1)
+        result[corr_country] = fixed[corr_country]
+        # Only write back corrected state if that column exists
+        if corr_state in result.columns:
+            # Don't blank out correctly-inferred states for non-CA countries
+            mask = fixed[corr_state] != ""
+            result.loc[mask, corr_state] = fixed.loc[mask, corr_state]
 
     # Write output
     out_ext = os.path.splitext(output_path)[1].lower()
