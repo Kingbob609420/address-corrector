@@ -93,6 +93,17 @@ _FIELD_KEYWORDS = {
         r"\bnation\b",
         r"\bnationality\b",
     ],
+    "company_name": [
+        r"\bname\b",
+        r"\bcompany\b",
+        r"\bvendor\s*name\b",
+        r"\bclient\s*name\b",
+        r"\bcustomer\s*name\b",
+        r"\borganis?ation\b",
+        r"\bfirm\b",
+        r"\bbusiness\s*name\b",
+        r"\bentity\b",
+    ],
     "postal_code": [
         r"\bpostal\b",
         r"\bpostalcode\b",
@@ -626,6 +637,33 @@ for _c in pycountry.countries:
             _COUNTRY_NAME_INDEX[_v.lower()] = _c
 _ALL_COUNTRY_NAMES = list(_COUNTRY_NAME_INDEX.keys())
 
+# Pre-built sorted list of country names (longest first) for greedy matching in company names
+# Only names ≥ 4 chars to avoid false positives (e.g. "in", "us", "de")
+_COUNTRY_WORDS_SORTED = sorted(
+    [n for n in _ALL_COUNTRY_NAMES if len(n) >= 4],
+    key=len, reverse=True
+)
+
+def _infer_country_from_company_name(name: str) -> str:
+    """
+    Scan a company / vendor name for an embedded country word.
+    E.g. "RYDER TRUCK RENTAL CANADA LTD" → "CA"
+         "DEUTSCHE BANK AG"              → "DE"
+    Returns ISO alpha-2 code, or "" if nothing found.
+    Only matches whole words (word-boundary check) to avoid false positives.
+    """
+    if not name:
+        return ""
+    name_lower = name.lower()
+    for country_word in _COUNTRY_WORDS_SORTED:
+        # Whole-word match only
+        pat = r"\b" + re.escape(country_word) + r"\b"
+        if re.search(pat, name_lower):
+            obj = _COUNTRY_NAME_INDEX.get(country_word)
+            if obj:
+                return _pycountry_alpha2(obj).upper()
+    return ""
+
 # ── Global ISO 3166-2 subdivision index ──────────────────────────────────────
 # Maps lowercase full-name → ISO subdivision code suffix (e.g. "california" → "CA")
 # Built from pycountry for all countries + manual entries for common aliases.
@@ -974,6 +1012,8 @@ def _write_excel(result_df, orig_cols, corrected_col_map, output_path, col_map):
     for field, orig_col in col_map.items():
         if orig_col is None:
             continue
+        if field not in DISPLAY_LABELS:
+            continue  # hint-only fields (e.g. company_name) have no corrected column
         corr_col = corrected_col_map.get(f"Corrected {DISPLAY_LABELS[field]}")
         if corr_col is None:
             continue
@@ -1013,7 +1053,8 @@ def process_file(input_path, output_path):
     print("\nDetected columns:")
     for field, col in col_map.items():
         status = f'"{col}"' if col else "NOT FOUND"
-        print(f"  {DISPLAY_LABELS[field]:20s} -> {status}")
+        label = DISPLAY_LABELS.get(field, field.replace("_", " ").title())
+        print(f"  {label:20s} -> {status}")
 
     # Apply corrections
     result = df.copy()
@@ -1022,35 +1063,50 @@ def process_file(input_path, output_path):
     for field, orig_col in col_map.items():
         if orig_col is None:
             continue
+        # company_name is a hint-only field — we don't produce a corrected column for it
+        if field not in CORRECTORS:
+            continue
         label = f"Corrected {DISPLAY_LABELS[field]}"
         result[label] = df[orig_col].apply(CORRECTORS[field])
         corrected_col_map[label] = label
 
-    # ── Auto-fix country & state using postal code evidence ───────────────
-    postal_col  = col_map.get("postal_code")
-    country_col = col_map.get("country")
-    state_col   = col_map.get("state")
+    # ── Auto-fix country & state using postal code + company name evidence ──
+    postal_col   = col_map.get("postal_code")
+    country_col  = col_map.get("country")
+    state_col    = col_map.get("state")
+    name_col     = col_map.get("company_name")   # e.g. NAME_1, Company, Vendor Name
     corr_country = "Corrected Country"
     corr_state   = "Corrected State"
     corr_postal  = "Corrected Postal Code"
 
-    if postal_col and corr_country in result.columns:
+    if corr_country in result.columns:
 
         def _fix_country_and_state(row):
             # Use the corrected postal if available, else fall back to original
-            postal  = str(row.get(corr_postal) or row.get(postal_col) or "").strip()
-            country = str(row.get(corr_country) or "").strip()
+            postal   = str(row.get(corr_postal) or (row.get(postal_col) if postal_col else "") or "").strip()
+            country  = str(row.get(corr_country) or "").strip()
             raw_state = str(row.get(corr_state) or "").strip() if corr_state in row.index else ""
             # Treat null-placeholder strings (e.g. "<NULL>", "N/A") as empty
             state = "" if raw_state.upper() in {s.upper() for s in _NULL_PLACEHOLDERS} else raw_state
 
-            inferred_country = detect_country_from_postal(postal)
+            # 1) Postal code is the strongest signal (unambiguous format patterns)
+            if postal_col:
+                inferred_country = detect_country_from_postal(postal)
+                if inferred_country and inferred_country != country:
+                    country = inferred_country
 
-            # Override country if postal code gives a confident answer
-            if inferred_country and inferred_country != country:
-                country = inferred_country
+            # 2) Company/vendor name as secondary signal — only used when postal
+            #    didn't resolve OR country still looks wrong (e.g. US when name says Canada)
+            if name_col:
+                company = str(row.get(name_col) or "").strip()
+                name_country = _infer_country_from_company_name(company)
+                if name_country and name_country != country:
+                    # Only trust the name hint if postal didn't already give a confident answer
+                    postal_answer = detect_country_from_postal(postal) if postal_col else ""
+                    if not postal_answer:
+                        country = name_country
 
-            # If country is CA, infer province from postal FSA
+            # 3) If country is CA, infer province from postal FSA
             if country == "CA":
                 inferred_province = infer_province_from_canadian_postal(postal)
                 if inferred_province:
@@ -1084,6 +1140,8 @@ def process_file(input_path, output_path):
     for field, orig_col in col_map.items():
         if orig_col is None:
             continue
+        if field not in DISPLAY_LABELS:
+            continue  # hint-only fields have no corrected column
         label = f"Corrected {DISPLAY_LABELS[field]}"
         changed = (
             result[orig_col].astype(str).str.strip()
