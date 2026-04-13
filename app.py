@@ -1,6 +1,11 @@
 import io
+import importlib
 import pandas as pd
 import streamlit as st
+
+# Force fresh import every deploy — prevents Streamlit Cloud from serving stale module
+import address_corrector as _ac
+importlib.reload(_ac)
 from address_corrector import CORRECTORS, DISPLAY_LABELS, _detect_columns, _write_excel, apply_autofix
 
 st.set_page_config(
