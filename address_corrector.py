@@ -1036,20 +1036,42 @@ def _write_excel(result_df, orig_cols, corrected_col_map, output_path, col_map):
 # AUTO-FIX  (reusable by both process_file and the Streamlit app)
 # ──────────────────────────────────────────────────────────────────────────────
 
+# State code → country mapping (codes that are UNAMBIGUOUS to one country)
+# Only include codes that cannot belong to multiple countries
+_STATE_CODE_TO_COUNTRY: dict[str, str] = {}
+
+# Canadian province codes → CA  (none overlap with US states)
+for _code in CA_PROVINCE_CODES:
+    _STATE_CODE_TO_COUNTRY[_code] = "CA"
+
+# Australian state codes → AU
+# NT overlaps with CA's Northwest Territories — skip it to avoid false positives
+for _code in AU_STATE_CODES - {"NT", "SA"}:
+    _STATE_CODE_TO_COUNTRY[_code] = "AU"
+
+# US state codes only added where they don't clash with AU/CA
+# (US has no overlap with CA province codes; AU "SA" clashes with nothing but keep cautious)
+# We do NOT add US state codes here — US is the default assumption already;
+# we only want to OVERRIDE when the state proves a *different* country.
+
+
 def apply_autofix(result: "pd.DataFrame", col_map: dict) -> None:
     """
-    In-place: fix Corrected Country and Corrected State columns using:
-      1. Postal code format (strongest signal — unambiguous patterns only)
-      2. Company / vendor name (fallback when postal gives no answer)
-      3. Canadian FSA letter → province inference
-    `result` must already contain the Corrected * columns.
-    `col_map` comes from _detect_columns().
+    In-place: fix Corrected Country and Corrected State for every row using
+    multiple evidence signals, strongest first:
+
+      1. Postal code format  — unambiguous country patterns (CA A1A1A1, GB SW1A2AA, etc.)
+      2. State/region code   — if corrected state is an unambiguous province/territory code
+                               (e.g. ON/AB/QC → CA;  NSW/VIC/QLD → AU)
+      3. Company/vendor name — country word embedded in name (e.g. "CANADA LTD" → CA)
+      4. Province from FSA   — infer Canadian province from postal FSA first letter
     """
-    postal_col  = col_map.get("postal_code")
-    name_col    = col_map.get("company_name")
-    corr_country = "Corrected Country"
-    corr_state   = "Corrected State"
-    corr_postal  = "Corrected Postal Code"
+    postal_col   = col_map.get("postal_code")
+    name_col     = col_map.get("company_name")
+    city_col_orig = col_map.get("city")          # original city column (for future use)
+    corr_country  = "Corrected Country"
+    corr_state    = "Corrected State"
+    corr_postal   = "Corrected Postal Code"
 
     if corr_country not in result.columns:
         return
@@ -1062,26 +1084,41 @@ def apply_autofix(result: "pd.DataFrame", col_map: dict) -> None:
         raw_state = str(row.get(corr_state)   or "").strip() if corr_state in row.index else ""
         state     = "" if raw_state.upper() in _null_upper else raw_state
 
-        # 1) Postal code — most reliable
-        if postal_col:
-            inferred = detect_country_from_postal(postal)
-            if inferred and inferred != country:
-                country = inferred
+        postal_inferred = detect_country_from_postal(postal) if postal_col else ""
 
-        # 2) Company name — fallback only when postal gave no answer
+        # ── Signal 1: postal code (strongest) ────────────────────────────────
+        if postal_inferred and postal_inferred != country:
+            country = postal_inferred
+
+        # ── Signal 2: state/region code unambiguously identifies a country ───
+        # Only fires when postal didn't already give us a confident answer,
+        # OR when postal confirmed the same country (so state just fills in the gap).
+        if state:
+            state_country = _STATE_CODE_TO_COUNTRY.get(state.upper(), "")
+            if state_country and state_country != country:
+                # Don't override a confident postal-code answer with a weaker state hint
+                if not postal_inferred:
+                    country = state_country
+
+        # ── Signal 3: company/vendor name ────────────────────────────────────
         if name_col:
             company = str(row.get(name_col) or "").strip()
             name_country = _infer_country_from_company_name(company)
-            if name_country and name_country != country:
-                postal_answer = detect_country_from_postal(postal) if postal_col else ""
-                if not postal_answer:
+            if name_country and name_country != country and not postal_inferred:
+                # also don't override if state already gave us an answer
+                if not _STATE_CODE_TO_COUNTRY.get(state.upper(), ""):
                     country = name_country
 
-        # 3) Canadian province from FSA
+        # ── Signal 4: Canadian province from FSA first letter ─────────────────
         if country == "CA":
             prov = infer_province_from_canadian_postal(postal)
-            if prov and (not state or state in _US_STATE_CODES):
+            if prov and (not state or state in _US_STATE_CODES or state.upper() in _null_upper):
                 state = prov
+
+        # ── Signal 4b: Australian state — infer country if not already CA/GB ──
+        if state.upper() in AU_STATE_CODES and country not in ("CA", "GB", "US"):
+            if not postal_inferred:
+                country = "AU"
 
         return pd.Series({corr_country: country, corr_state: state})
 
