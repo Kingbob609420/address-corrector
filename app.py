@@ -480,6 +480,7 @@ if df_raw is not None and len(df_raw) > 0:
     corrected_col_map = {}
     for field, orig_col in col_map.items():
         if orig_col is None: continue
+        if field not in CORRECTORS: continue   # hint-only fields (e.g. company_name)
         lbl = f"Corrected {DISPLAY_LABELS[field]}"
         result[lbl] = df_raw[orig_col].apply(CORRECTORS[field])
         corrected_col_map[lbl] = lbl
@@ -488,7 +489,9 @@ if df_raw is not None and len(df_raw) > 0:
     per_field, total_changed = {}, 0
     for field, orig_col in col_map.items():
         if orig_col is None: continue
+        if field not in DISPLAY_LABELS: continue   # hint-only fields
         lbl = f"Corrected {DISPLAY_LABELS[field]}"
+        if lbl not in result.columns: continue
         n = (result[orig_col].astype(str).str.strip() != result[lbl].astype(str).str.strip()).sum()
         per_field[DISPLAY_LABELS[field]] = int(n)
         total_changed += n
@@ -556,8 +559,9 @@ if df_raw is not None and len(df_raw) > 0:
     elif view_mode == "Changes only":
         mask = pd.Series(False, index=result.index)
         for field, orig_col in col_map.items():
-            if orig_col is None: continue
+            if orig_col is None or field not in DISPLAY_LABELS: continue
             lbl = f"Corrected {DISPLAY_LABELS[field]}"
+            if lbl not in result.columns: continue
             mask |= result[orig_col].astype(str).str.strip() != result[lbl].astype(str).str.strip()
         display_df = result[mask]
     else:
@@ -566,6 +570,7 @@ if df_raw is not None and len(df_raw) > 0:
     def highlight_changes(df):
         s = pd.DataFrame("", index=df.index, columns=df.columns)
         for field, orig_col in col_map.items():
+            if field not in DISPLAY_LABELS: continue
             lbl = f"Corrected {DISPLAY_LABELS[field]}"
             if orig_col not in df.columns or lbl not in df.columns: continue
             changed = df[orig_col].astype(str).str.strip() != df[lbl].astype(str).str.strip()
