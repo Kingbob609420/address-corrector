@@ -1033,6 +1033,66 @@ def _write_excel(result_df, orig_cols, corrected_col_map, output_path, col_map):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# AUTO-FIX  (reusable by both process_file and the Streamlit app)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def apply_autofix(result: "pd.DataFrame", col_map: dict) -> None:
+    """
+    In-place: fix Corrected Country and Corrected State columns using:
+      1. Postal code format (strongest signal — unambiguous patterns only)
+      2. Company / vendor name (fallback when postal gives no answer)
+      3. Canadian FSA letter → province inference
+    `result` must already contain the Corrected * columns.
+    `col_map` comes from _detect_columns().
+    """
+    postal_col  = col_map.get("postal_code")
+    name_col    = col_map.get("company_name")
+    corr_country = "Corrected Country"
+    corr_state   = "Corrected State"
+    corr_postal  = "Corrected Postal Code"
+
+    if corr_country not in result.columns:
+        return
+
+    _null_upper = {s.upper() for s in _NULL_PLACEHOLDERS}
+
+    def _fix_row(row):
+        postal    = str(row.get(corr_postal) or (row.get(postal_col) if postal_col else "") or "").strip()
+        country   = str(row.get(corr_country) or "").strip()
+        raw_state = str(row.get(corr_state)   or "").strip() if corr_state in row.index else ""
+        state     = "" if raw_state.upper() in _null_upper else raw_state
+
+        # 1) Postal code — most reliable
+        if postal_col:
+            inferred = detect_country_from_postal(postal)
+            if inferred and inferred != country:
+                country = inferred
+
+        # 2) Company name — fallback only when postal gave no answer
+        if name_col:
+            company = str(row.get(name_col) or "").strip()
+            name_country = _infer_country_from_company_name(company)
+            if name_country and name_country != country:
+                postal_answer = detect_country_from_postal(postal) if postal_col else ""
+                if not postal_answer:
+                    country = name_country
+
+        # 3) Canadian province from FSA
+        if country == "CA":
+            prov = infer_province_from_canadian_postal(postal)
+            if prov and (not state or state in _US_STATE_CODES):
+                state = prov
+
+        return pd.Series({corr_country: country, corr_state: state})
+
+    fixed = result.apply(_fix_row, axis=1)
+    result[corr_country] = fixed[corr_country]
+    if corr_state in result.columns:
+        mask = fixed[corr_state] != ""
+        result.loc[mask, corr_state] = fixed.loc[mask, corr_state]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # MAIN PROCESS
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -1071,58 +1131,7 @@ def process_file(input_path, output_path):
         corrected_col_map[label] = label
 
     # ── Auto-fix country & state using postal code + company name evidence ──
-    postal_col   = col_map.get("postal_code")
-    country_col  = col_map.get("country")
-    state_col    = col_map.get("state")
-    name_col     = col_map.get("company_name")   # e.g. NAME_1, Company, Vendor Name
-    corr_country = "Corrected Country"
-    corr_state   = "Corrected State"
-    corr_postal  = "Corrected Postal Code"
-
-    if corr_country in result.columns:
-
-        def _fix_country_and_state(row):
-            # Use the corrected postal if available, else fall back to original
-            postal   = str(row.get(corr_postal) or (row.get(postal_col) if postal_col else "") or "").strip()
-            country  = str(row.get(corr_country) or "").strip()
-            raw_state = str(row.get(corr_state) or "").strip() if corr_state in row.index else ""
-            # Treat null-placeholder strings (e.g. "<NULL>", "N/A") as empty
-            state = "" if raw_state.upper() in {s.upper() for s in _NULL_PLACEHOLDERS} else raw_state
-
-            # 1) Postal code is the strongest signal (unambiguous format patterns)
-            if postal_col:
-                inferred_country = detect_country_from_postal(postal)
-                if inferred_country and inferred_country != country:
-                    country = inferred_country
-
-            # 2) Company/vendor name as secondary signal — only used when postal
-            #    didn't resolve OR country still looks wrong (e.g. US when name says Canada)
-            if name_col:
-                company = str(row.get(name_col) or "").strip()
-                name_country = _infer_country_from_company_name(company)
-                if name_country and name_country != country:
-                    # Only trust the name hint if postal didn't already give a confident answer
-                    postal_answer = detect_country_from_postal(postal) if postal_col else ""
-                    if not postal_answer:
-                        country = name_country
-
-            # 3) If country is CA, infer province from postal FSA
-            if country == "CA":
-                inferred_province = infer_province_from_canadian_postal(postal)
-                if inferred_province:
-                    # Override state if it is null, empty, or a US state code
-                    if not state or state in _US_STATE_CODES:
-                        state = inferred_province
-
-            return pd.Series({corr_country: country, corr_state: state})
-
-        fixed = result.apply(_fix_country_and_state, axis=1)
-        result[corr_country] = fixed[corr_country]
-        # Only write back corrected state if that column exists
-        if corr_state in result.columns:
-            # Don't blank out correctly-inferred states for non-CA countries
-            mask = fixed[corr_state] != ""
-            result.loc[mask, corr_state] = fixed.loc[mask, corr_state]
+    apply_autofix(result, col_map)
 
     # Write output
     out_ext = os.path.splitext(output_path)[1].lower()

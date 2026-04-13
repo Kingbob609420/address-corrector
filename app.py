@@ -1,7 +1,7 @@
 import io
 import pandas as pd
 import streamlit as st
-from address_corrector import CORRECTORS, DISPLAY_LABELS, _detect_columns, _write_excel
+from address_corrector import CORRECTORS, DISPLAY_LABELS, _detect_columns, _write_excel, apply_autofix
 
 st.set_page_config(
     page_title="Address Corrector",
@@ -484,6 +484,9 @@ if df_raw is not None and len(df_raw) > 0:
         lbl = f"Corrected {DISPLAY_LABELS[field]}"
         result[lbl] = df_raw[orig_col].apply(CORRECTORS[field])
         corrected_col_map[lbl] = lbl
+
+    # Auto-fix country & state from postal code + company name hints
+    apply_autofix(result, col_map)
 
     # Stats
     per_field, total_changed = {}, 0
