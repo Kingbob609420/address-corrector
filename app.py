@@ -6,7 +6,12 @@ import streamlit as st
 # Force fresh import every deploy — prevents Streamlit Cloud from serving stale module
 import address_corrector as _ac
 importlib.reload(_ac)
-from address_corrector import CORRECTORS, DISPLAY_LABELS, _detect_columns, _write_excel, apply_autofix
+from address_corrector import (
+    CORRECTORS, DISPLAY_LABELS, _detect_columns, _write_excel, apply_autofix,
+    correct_address_line, correct_city, correct_state, correct_country, correct_postal_code,
+    detect_country_from_postal, infer_province_from_canadian_postal,
+    _US_STATE_CODES, _NULL_PLACEHOLDERS, _STATE_CODE_TO_COUNTRY,
+)
 
 st.set_page_config(
     page_title="Address Corrector",
@@ -457,6 +462,104 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+def _run_single_correction(addr1, addr2, addr3, city, state, country, postal):
+    """Apply all corrections to a single address and return (original, corrected) dicts."""
+    _null_upper = {s.upper() for s in _NULL_PLACEHOLDERS}
+
+    # Step 1 — correct each field independently
+    c_addr1  = correct_address_line(addr1)
+    c_addr2  = correct_address_line(addr2)
+    c_addr3  = correct_address_line(addr3)
+    c_city   = correct_city(city)
+    c_postal = correct_postal_code(postal)
+    c_country = correct_country(country)
+    c_state  = correct_state(state)
+    # Treat null placeholders as empty
+    if c_state.upper() in _null_upper:
+        c_state = ""
+
+    # Step 2 — auto-fix country using postal code (strongest signal)
+    postal_inferred = detect_country_from_postal(c_postal)
+    if postal_inferred:
+        c_country = postal_inferred
+
+    # Step 3 — auto-fix country using state code if postal gave no answer
+    if not postal_inferred and c_state:
+        state_country = _STATE_CODE_TO_COUNTRY.get(c_state.upper(), "")
+        if state_country:
+            c_country = state_country
+
+    # Step 4 — infer province from Canadian FSA when country is CA
+    if c_country == "CA":
+        prov = infer_province_from_canadian_postal(c_postal)
+        if prov and (not c_state or c_state in _US_STATE_CODES):
+            c_state = prov
+
+    # Step 5 — re-correct state now we know the definitive country
+    #          (e.g. user typed "Ontario" → correct_state already gave "ON",
+    #           but if it was a misspelling this pass cleans it up with country context)
+    if c_state and len(c_state) > 2:
+        c_state = correct_state(c_state, country_hint=c_country)
+
+    originals  = {"Address Line 1": addr1,  "Address Line 2": addr2,
+                  "Address Line 3": addr3,  "City": city,
+                  "State": state, "Country": country, "Postal Code": postal}
+    corrected  = {"Address Line 1": c_addr1, "Address Line 2": c_addr2,
+                  "Address Line 3": c_addr3, "City": c_city,
+                  "State": c_state, "Country": c_country, "Postal Code": c_postal}
+    return originals, corrected
+
+
+def _render_single_result(payload):
+    originals, corrected = payload
+    field_order = ["Address Line 1", "Address Line 2", "Address Line 3",
+                   "City", "State", "Country", "Postal Code"]
+
+    st.markdown('<div style="max-width:680px;margin:1.5rem auto 0">', unsafe_allow_html=True)
+    st.markdown("""
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:14px;
+                padding:1.4rem 1.8rem;margin-bottom:1rem">
+        <div style="font-size:.72rem;font-weight:700;letter-spacing:.08em;
+                    color:#6c47ff;text-transform:uppercase;margin-bottom:1.1rem">
+            Corrected Address
+        </div>
+    """, unsafe_allow_html=True)
+
+    any_change = False
+    rows_html  = ""
+    for label in field_order:
+        orig_disp = (originals.get(label) or "").strip()
+        corr_disp = (corrected.get(label) or "").strip()
+        if not orig_disp and not corr_disp:
+            continue
+        # Case-sensitive comparison — "calgary" → "CALGARY" IS a change
+        changed = orig_disp != corr_disp and corr_disp
+        if changed:
+            any_change = True
+        orig_style = ("color:#a16207;background:#fefce8;padding:2px 7px;"
+                      "border-radius:4px;font-weight:500") if changed else "color:#71717a"
+        corr_style = ("color:#15803d;background:#f0fdf4;padding:2px 7px;"
+                      "border-radius:4px;font-weight:700") if changed else "color:#111118;font-weight:500"
+        arrow = '<span style="color:#c4c4cc;margin:0 5px;font-size:.8rem">→</span>' if changed else ""
+        rows_html += f"""
+        <div style="display:flex;align-items:center;gap:.5rem;padding:.5rem 0;
+                    border-bottom:1px solid #f4f4f5">
+            <span style="font-size:.71rem;color:#a1a1aa;min-width:120px;
+                         flex-shrink:0;text-transform:uppercase;letter-spacing:.04em">{label}</span>
+            <span style="font-size:.87rem;{orig_style}">{orig_disp or '<span style="color:#d4d4d8">—</span>'}</span>
+            {arrow}
+            <span style="font-size:.87rem;{corr_style}">{corr_disp or '<span style="color:#d4d4d8">—</span>'}</span>
+        </div>"""
+
+    st.markdown(rows_html + "</div></div>", unsafe_allow_html=True)
+
+    if not any_change:
+        st.markdown(
+            '<div class="toast-ok" style="max-width:680px;margin:0 auto">'
+            '✓ &nbsp;Address looks good — no corrections needed.</div>',
+            unsafe_allow_html=True)
+
+
 tab_single, tab_bulk = st.tabs(["  Single Address  ", "  Bulk (Paste / Upload)  "])
 df_raw = None
 
@@ -478,84 +581,13 @@ with tab_single:
     st.markdown('</div>', unsafe_allow_html=True)
 
     if run_single:
-        # Build a one-row DataFrame with standard column names so _detect_columns works
-        single_df = pd.DataFrame([{
-            "Address Line 1": s_addr1,
-            "Address Line 2": s_addr2,
-            "Address Line 3": s_addr3,
-            "City":           s_city,
-            "State":          s_state,
-            "Country":        s_country,
-            "Postal Code":    s_postal,
-        }]).fillna("")
+        st.session_state["single_result"] = _run_single_correction(
+            s_addr1, s_addr2, s_addr3, s_city, s_state, s_country, s_postal
+        )
 
-        col_map_s = _detect_columns(single_df.columns)
-        res_s = single_df.copy()
-        for field, orig_col in col_map_s.items():
-            if orig_col is None or field not in CORRECTORS:
-                continue
-            lbl = f"Corrected {DISPLAY_LABELS[field]}"
-            res_s[lbl] = single_df[orig_col].apply(CORRECTORS[field])
-        apply_autofix(res_s, col_map_s)
-
-        # Display as a clean comparison card
-        fields_to_show = [
-            ("Address Line 1", s_addr1),
-            ("Address Line 2", s_addr2),
-            ("Address Line 3", s_addr3),
-            ("City",           s_city),
-            ("State",          s_state),
-            ("Country",        s_country),
-            ("Postal Code",    s_postal),
-        ]
-        corrected_vals = {
-            "Address Line 1": res_s.get("Corrected Address Line 1", pd.Series([""])).iloc[0],
-            "Address Line 2": res_s.get("Corrected Address Line 2", pd.Series([""])).iloc[0],
-            "Address Line 3": res_s.get("Corrected Address Line 3", pd.Series([""])).iloc[0],
-            "City":           res_s.get("Corrected City",           pd.Series([""])).iloc[0],
-            "State":          res_s.get("Corrected State",          pd.Series([""])).iloc[0],
-            "Country":        res_s.get("Corrected Country",        pd.Series([""])).iloc[0],
-            "Postal Code":    res_s.get("Corrected Postal Code",    pd.Series([""])).iloc[0],
-        }
-
-        st.markdown('<div style="max-width:680px;margin:1.5rem auto 0">', unsafe_allow_html=True)
-        st.markdown("""
-        <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:14px;
-                    padding:1.4rem 1.8rem;margin-bottom:1rem">
-            <div style="font-size:.72rem;font-weight:700;letter-spacing:.08em;
-                        color:#6c47ff;text-transform:uppercase;margin-bottom:1rem">
-                Corrected Address
-            </div>
-        """, unsafe_allow_html=True)
-
-        any_change = False
-        rows_html = ""
-        for label, original in fields_to_show:
-            corrected = corrected_vals.get(label, "")
-            orig_disp = original.strip()
-            corr_disp = corrected.strip()
-            if not orig_disp and not corr_disp:
-                continue
-            changed = orig_disp.upper() != corr_disp.upper() and corr_disp
-            if changed:
-                any_change = True
-            orig_style = "color:#a16207;background:#fefce8;padding:2px 6px;border-radius:4px;" if changed else "color:#52525b"
-            corr_style = "color:#15803d;background:#f0fdf4;padding:2px 6px;border-radius:4px;font-weight:600" if changed else "color:#111118;font-weight:500"
-            arrow = ' <span style="color:#a1a1aa;margin:0 6px">→</span> ' if changed else ""
-            rows_html += f"""
-            <div style="display:flex;align-items:baseline;gap:.75rem;padding:.45rem 0;
-                        border-bottom:1px solid #f4f4f5">
-                <span style="font-size:.72rem;color:#a1a1aa;min-width:130px;flex-shrink:0">{label}</span>
-                <span style="font-size:.88rem;{orig_style}">{orig_disp or "—"}</span>
-                {arrow}
-                <span style="font-size:.88rem;{corr_style}">{corr_disp or "—"}</span>
-            </div>"""
-
-        st.markdown(rows_html + "</div></div>", unsafe_allow_html=True)
-
-        if not any_change:
-            st.markdown('<div class="toast-ok">✓ &nbsp;Address looks good — no corrections needed.</div>',
-                        unsafe_allow_html=True)
+    # Show result card (persists across reruns via session_state)
+    if "single_result" in st.session_state:
+        _render_single_result(st.session_state["single_result"])
 
 # ── Tab 2: Bulk input (paste + upload) ───────────────────────────────────────
 with tab_bulk:
