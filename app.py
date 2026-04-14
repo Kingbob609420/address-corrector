@@ -390,76 +390,176 @@ st.markdown("""
 <div class="tool-wrap" id="load">
     <div class="tool-label">Step 1</div>
     <div class="tool-heading">Load your addresses</div>
-    <div class="tool-sub">Choose how you want to bring in your data — both ways get the same result.</div>
+    <div class="tool-sub">Correct a single address instantly, or process hundreds at once.</div>
 </div>
 """, unsafe_allow_html=True)
 
-# Two input panels (Streamlit columns for interactive widgets)
-col_paste, col_or, col_upload = st.columns([10, 1, 10])
+tab_single, tab_bulk = st.tabs(["  Single Address  ", "  Bulk (Paste / Upload)  "])
 df_raw = None
 
-with col_paste:
-    st.markdown("""
-    <div class="panel">
-        <div class="panel-icon">📋</div>
-        <div class="panel-title">Paste from Excel</div>
-        <div class="panel-desc">
-            Copy a block of cells with the header row and paste below.<br>
-            Tab, comma &amp; semicolon delimiters auto-detected.
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    pasted = st.text_area(
-        "paste", height=200, label_visibility="collapsed",
-        placeholder=(
-            "Address Line 1\tCity\tState\tCountry\tPostal Code\n"
-            "123 main st\tnew york\tnew york\tUSA\t10001\n"
-            "10 Downing St\tlondon\t\tuk\tSW1A2AA"
-        ),
-    )
-    if pasted.strip():
-        sample = pasted.split("\n")[0]
-        tabs, commas, semis = sample.count("\t"), sample.count(","), sample.count(";")
-        delim = "\t" if tabs >= commas and tabs >= semis else (";" if semis > commas else ",")
-        try:
-            df_raw = pd.read_csv(io.StringIO(pasted), sep=delim, dtype=str, on_bad_lines="skip").fillna("")
-            st.markdown(f'<div class="toast-ok">✓ &nbsp;{len(df_raw):,} rows ready</div>', unsafe_allow_html=True)
-        except Exception as e:
-            st.error(str(e))
+# ── Tab 1: Single address form ────────────────────────────────────────────────
+with tab_single:
+    st.markdown('<div style="max-width:680px;margin:1.5rem auto 0">', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        s_addr1   = st.text_input("Address Line 1", placeholder="123 Main St")
+        s_addr2   = st.text_input("Address Line 2", placeholder="Suite 400")
+        s_addr3   = st.text_input("Address Line 3", placeholder="")
+        s_city    = st.text_input("City",           placeholder="Calgary")
+    with c2:
+        s_state   = st.text_input("State / Province / Region", placeholder="AB")
+        s_country = st.text_input("Country",        placeholder="Canada")
+        s_postal  = st.text_input("Postal / ZIP Code", placeholder="T3M 0V4")
 
-with col_or:
-    st.markdown("""
-    <div class="or-col" style="height:340px">
-        <div class="or-line-seg"></div>
-        <div class="or-circle">OR</div>
-        <div class="or-line-seg"></div>
-    </div>
-    """, unsafe_allow_html=True)
+    run_single = st.button("Correct this address", type="primary", use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-with col_upload:
-    st.markdown("""
-    <div class="panel">
-        <div class="panel-icon">📁</div>
-        <div class="panel-title">Upload a file</div>
-        <div class="panel-desc">
-            Drop in a CSV or Excel file.<br>
-            All column formats handled automatically.
+    if run_single:
+        # Build a one-row DataFrame with standard column names so _detect_columns works
+        single_df = pd.DataFrame([{
+            "Address Line 1": s_addr1,
+            "Address Line 2": s_addr2,
+            "Address Line 3": s_addr3,
+            "City":           s_city,
+            "State":          s_state,
+            "Country":        s_country,
+            "Postal Code":    s_postal,
+        }]).fillna("")
+
+        col_map_s = _detect_columns(single_df.columns)
+        res_s = single_df.copy()
+        for field, orig_col in col_map_s.items():
+            if orig_col is None or field not in CORRECTORS:
+                continue
+            lbl = f"Corrected {DISPLAY_LABELS[field]}"
+            res_s[lbl] = single_df[orig_col].apply(CORRECTORS[field])
+        apply_autofix(res_s, col_map_s)
+
+        # Display as a clean comparison card
+        fields_to_show = [
+            ("Address Line 1", s_addr1),
+            ("Address Line 2", s_addr2),
+            ("Address Line 3", s_addr3),
+            ("City",           s_city),
+            ("State",          s_state),
+            ("Country",        s_country),
+            ("Postal Code",    s_postal),
+        ]
+        corrected_vals = {
+            "Address Line 1": res_s.get("Corrected Address Line 1", pd.Series([""])).iloc[0],
+            "Address Line 2": res_s.get("Corrected Address Line 2", pd.Series([""])).iloc[0],
+            "Address Line 3": res_s.get("Corrected Address Line 3", pd.Series([""])).iloc[0],
+            "City":           res_s.get("Corrected City",           pd.Series([""])).iloc[0],
+            "State":          res_s.get("Corrected State",          pd.Series([""])).iloc[0],
+            "Country":        res_s.get("Corrected Country",        pd.Series([""])).iloc[0],
+            "Postal Code":    res_s.get("Corrected Postal Code",    pd.Series([""])).iloc[0],
+        }
+
+        st.markdown('<div style="max-width:680px;margin:1.5rem auto 0">', unsafe_allow_html=True)
+        st.markdown("""
+        <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:14px;
+                    padding:1.4rem 1.8rem;margin-bottom:1rem">
+            <div style="font-size:.72rem;font-weight:700;letter-spacing:.08em;
+                        color:#6c47ff;text-transform:uppercase;margin-bottom:1rem">
+                Corrected Address
+            </div>
+        """, unsafe_allow_html=True)
+
+        any_change = False
+        rows_html = ""
+        for label, original in fields_to_show:
+            corrected = corrected_vals.get(label, "")
+            orig_disp = original.strip()
+            corr_disp = corrected.strip()
+            if not orig_disp and not corr_disp:
+                continue
+            changed = orig_disp.upper() != corr_disp.upper() and corr_disp
+            if changed:
+                any_change = True
+            orig_style = "color:#a16207;background:#fefce8;padding:2px 6px;border-radius:4px;" if changed else "color:#52525b"
+            corr_style = "color:#15803d;background:#f0fdf4;padding:2px 6px;border-radius:4px;font-weight:600" if changed else "color:#111118;font-weight:500"
+            arrow = ' <span style="color:#a1a1aa;margin:0 6px">→</span> ' if changed else ""
+            rows_html += f"""
+            <div style="display:flex;align-items:baseline;gap:.75rem;padding:.45rem 0;
+                        border-bottom:1px solid #f4f4f5">
+                <span style="font-size:.72rem;color:#a1a1aa;min-width:130px;flex-shrink:0">{label}</span>
+                <span style="font-size:.88rem;{orig_style}">{orig_disp or "—"}</span>
+                {arrow}
+                <span style="font-size:.88rem;{corr_style}">{corr_disp or "—"}</span>
+            </div>"""
+
+        st.markdown(rows_html + "</div></div>", unsafe_allow_html=True)
+
+        if not any_change:
+            st.markdown('<div class="toast-ok">✓ &nbsp;Address looks good — no corrections needed.</div>',
+                        unsafe_allow_html=True)
+
+# ── Tab 2: Bulk input (paste + upload) ───────────────────────────────────────
+with tab_bulk:
+    col_paste, col_or, col_upload = st.columns([10, 1, 10])
+
+    with col_paste:
+        st.markdown("""
+        <div class="panel">
+            <div class="panel-icon">📋</div>
+            <div class="panel-title">Paste from Excel</div>
+            <div class="panel-desc">
+                Copy a block of cells with the header row and paste below.<br>
+                Tab, comma &amp; semicolon delimiters auto-detected.
+            </div>
         </div>
-    </div>
-    """, unsafe_allow_html=True)
-    uploaded = st.file_uploader("upload", type=["csv","xlsx","xls"], label_visibility="collapsed")
-    if uploaded:
-        try:
-            df_raw = (
-                pd.read_csv(uploaded, dtype=str) if uploaded.name.endswith(".csv")
-                else pd.read_excel(uploaded, dtype=str)
-            ).fillna("")
-            st.markdown(
-                f'<div class="toast-ok">✓ &nbsp;{uploaded.name} &nbsp;·&nbsp; {len(df_raw):,} rows</div>',
-                unsafe_allow_html=True,
-            )
-        except Exception as e:
-            st.error(str(e))
+        """, unsafe_allow_html=True)
+        pasted = st.text_area(
+            "paste", height=200, label_visibility="collapsed",
+            placeholder=(
+                "Address Line 1\tCity\tState\tCountry\tPostal Code\n"
+                "123 main st\tnew york\tnew york\tUSA\t10001\n"
+                "10 Downing St\tlondon\t\tuk\tSW1A2AA"
+            ),
+        )
+        if pasted.strip():
+            sample = pasted.split("\n")[0]
+            tabs, commas, semis = sample.count("\t"), sample.count(","), sample.count(";")
+            delim = "\t" if tabs >= commas and tabs >= semis else (";" if semis > commas else ",")
+            try:
+                df_raw = pd.read_csv(io.StringIO(pasted), sep=delim, dtype=str, on_bad_lines="skip").fillna("")
+                st.markdown(f'<div class="toast-ok">✓ &nbsp;{len(df_raw):,} rows ready</div>', unsafe_allow_html=True)
+            except Exception as e:
+                st.error(str(e))
+
+    with col_or:
+        st.markdown("""
+        <div class="or-col" style="height:340px">
+            <div class="or-line-seg"></div>
+            <div class="or-circle">OR</div>
+            <div class="or-line-seg"></div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col_upload:
+        st.markdown("""
+        <div class="panel">
+            <div class="panel-icon">📁</div>
+            <div class="panel-title">Upload a file</div>
+            <div class="panel-desc">
+                Drop in a CSV or Excel file.<br>
+                All column formats handled automatically.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        uploaded = st.file_uploader("upload", type=["csv","xlsx","xls"], label_visibility="collapsed")
+        if uploaded:
+            try:
+                df_raw = (
+                    pd.read_csv(uploaded, dtype=str) if uploaded.name.endswith(".csv")
+                    else pd.read_excel(uploaded, dtype=str)
+                ).fillna("")
+                st.markdown(
+                    f'<div class="toast-ok">✓ &nbsp;{uploaded.name} &nbsp;·&nbsp; {len(df_raw):,} rows</div>',
+                    unsafe_allow_html=True,
+                )
+            except Exception as e:
+                st.error(str(e))
 
 # ══════════════════════════════════════════════════════════════════════════════
 # RESULTS
