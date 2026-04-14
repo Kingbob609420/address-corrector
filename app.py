@@ -218,6 +218,69 @@ html, body,
     flex-shrink: 0;
 }
 
+/* ══ TEXT INPUTS (single address form) ════════════════ */
+[data-testid="stTextInput"] input {
+    background: #ffffff !important;
+    border: 1.5px solid rgba(0,0,0,.10) !important;
+    border-radius: 10px !important;
+    color: #111118 !important;
+    font-family: 'Inter', sans-serif !important;
+    font-size: .88rem !important;
+    padding: .55rem .85rem !important;
+    transition: border-color .15s, box-shadow .15s !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,.04) !important;
+}
+[data-testid="stTextInput"] input:focus {
+    border-color: #6c47ff !important;
+    box-shadow: 0 0 0 3px rgba(108,71,255,.12) !important;
+    outline: none !important;
+}
+[data-testid="stTextInput"] input::placeholder { color: #c4c4cc !important; }
+[data-testid="stTextInput"] label {
+    font-size: .73rem !important;
+    font-weight: 600 !important;
+    color: #71717a !important;
+    letter-spacing: .02em !important;
+    text-transform: uppercase !important;
+}
+
+/* ══ PRIMARY BUTTON (purple, not red) ═════════════════ */
+[data-testid="stButton"] > button[kind="primary"],
+[data-testid="stButton"] > button {
+    background: #6c47ff !important;
+    color: #ffffff !important;
+    border: none !important;
+    border-radius: 100px !important;
+    font-weight: 700 !important;
+    font-size: .88rem !important;
+    height: 46px !important;
+    box-shadow: 0 4px 16px rgba(108,71,255,.30) !important;
+    transition: background .15s, box-shadow .15s, transform .1s !important;
+}
+[data-testid="stButton"] > button:hover {
+    background: #5a35ed !important;
+    box-shadow: 0 6px 22px rgba(108,71,255,.42) !important;
+    transform: translateY(-1px) !important;
+}
+
+/* ══ TABS ══════════════════════════════════════════════ */
+[data-testid="stTabs"] [data-testid="stTab"] {
+    font-weight: 600 !important;
+    font-size: .85rem !important;
+    color: #71717a !important;
+    border-radius: 8px 8px 0 0 !important;
+    padding: .55rem 1.4rem !important;
+    transition: color .15s !important;
+}
+[data-testid="stTabs"] [data-testid="stTab"][aria-selected="true"] {
+    color: #6c47ff !important;
+    border-bottom: 2px solid #6c47ff !important;
+}
+[data-testid="stTabs"] [role="tablist"] {
+    border-bottom: 1.5px solid rgba(0,0,0,.08) !important;
+    margin-bottom: 1.8rem !important;
+}
+
 /* Textarea */
 textarea {
     background: #fafafa !important;
