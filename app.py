@@ -6,11 +6,13 @@ import streamlit as st
 # Force fresh import every deploy — prevents Streamlit Cloud from serving stale module
 import address_corrector as _ac
 importlib.reload(_ac)
+import re as _re
 from address_corrector import (
     CORRECTORS, DISPLAY_LABELS, _detect_columns, _write_excel, apply_autofix,
     correct_address_line, correct_city, correct_state, correct_country, correct_postal_code,
     detect_country_from_postal, infer_province_from_canadian_postal,
     _US_STATE_CODES, _NULL_PLACEHOLDERS, _STATE_CODE_TO_COUNTRY,
+    _COUNTRY_NAME_INDEX, _STATE_FUZZY_INDEX,
 )
 
 st.set_page_config(
@@ -462,6 +464,76 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+def _parse_full_address(text):
+    """
+    Parse a free-text address into (addr1, addr2, addr3, city, state, country, postal).
+    Strategy: scan ALL parts for postal/country/state using patterns + lookups,
+    then assign what remains to address/city (working from end = city, front = street).
+    """
+    parts = [p.strip() for p in _re.split(r"[,\n;|]+", text) if p.strip()]
+    if not parts:
+        return "", "", "", "", "", "", ""
+
+    used   = [False] * len(parts)
+    postal = state = country = ""
+
+    # ── Postal patterns (tried against every part, highest specificity first) ───
+    _postal_pats = [
+        r"^[A-Za-z]\d[A-Za-z]\d[A-Za-z]\d$",          # Canadian A1A1A1
+        r"^[A-Za-z]{1,2}\d[A-Za-z\d]?\d[A-Za-z]{2}$", # UK SW1A2AA
+        r"^\d{5}-\d{4}$",                               # US ZIP+4
+        r"^\d{5}-\d{5,}$",                              # malformed 5+N ZIP
+        r"^\d{4}[A-Za-z]{2}$",                          # Dutch 1234AB
+        r"^\d{4,6}$",                                   # generic numeric
+    ]
+
+    # ── 1. Find postal (last matching part wins so street numbers don't steal) ──
+    for i in reversed(range(len(parts))):
+        s = parts[i].replace(" ", "")
+        for pat in _postal_pats:
+            if _re.match(pat, s, _re.I):
+                postal = parts[i]
+                used[i] = True
+                break
+        if postal:
+            break
+
+    # ── 2. Find country (working from right, skip used) ─────────────────────────
+    for i in reversed(range(len(parts))):
+        if used[i]:
+            continue
+        part = parts[i]
+        test = part.strip().lower()
+        corrected_c = correct_country(part)
+        # Match if: (a) lookup returns a different (shorter) code, or (b) exact key
+        if (corrected_c and corrected_c != part.strip().upper()) or test in _COUNTRY_NAME_INDEX:
+            country = part
+            used[i] = True
+            break
+
+    # ── 3. Find state (working from right, skip used) ────────────────────────────
+    for i in reversed(range(len(parts))):
+        if used[i]:
+            continue
+        part  = parts[i]
+        test  = part.strip().lower()
+        short = part.strip()
+        if (len(short) <= 3 and short.isalpha()) or test in _STATE_FUZZY_INDEX:
+            state = part
+            used[i] = True
+            break
+
+    # ── 4. Remaining → last unused = city, earlier unused = address lines ────────
+    remaining = [parts[i] for i in range(len(parts)) if not used[i]]
+    city      = remaining[-1]        if remaining          else ""
+    addr_parts = remaining[:-1]      if len(remaining) > 1 else []
+    addr1     = addr_parts[0]        if len(addr_parts) > 0 else ""
+    addr2     = addr_parts[1]        if len(addr_parts) > 1 else ""
+    addr3     = ", ".join(addr_parts[2:]) if len(addr_parts) > 2 else ""
+
+    return addr1, addr2, addr3, city, state, country, postal
+
+
 def _run_single_correction(addr1, addr2, addr3, city, state, country, postal):
     """Apply all corrections to a single address and return (original, corrected) dicts."""
     _null_upper = {s.upper() for s in _NULL_PLACEHOLDERS}
@@ -563,29 +635,59 @@ def _render_single_result(payload):
 tab_single, tab_bulk = st.tabs(["  Single Address  ", "  Bulk (Paste / Upload)  "])
 df_raw = None
 
-# ── Tab 1: Single address form ────────────────────────────────────────────────
+# ── Tab 1: Single address ─────────────────────────────────────────────────────
 with tab_single:
     st.markdown('<div style="max-width:680px;margin:1.5rem auto 0">', unsafe_allow_html=True)
+
+    # ── Free-text entry (type the whole address at once) ──────────────────────
+    st.markdown("""
+    <div style="font-size:.73rem;font-weight:600;color:#71717a;
+                text-transform:uppercase;letter-spacing:.06em;margin-bottom:.4rem">
+        Full Address
+    </div>""", unsafe_allow_html=True)
+    full_addr = st.text_area(
+        "full_addr", height=110, label_visibility="collapsed",
+        placeholder=(
+            "Type or paste the whole address — any format:\n"
+            "123 Main St, Calgary, KS, United States, T3M 0V4\n"
+            "or fill in the individual fields below instead"
+        ),
+        key="single_full_addr",
+    )
+
+    st.markdown('<div style="margin:1rem 0 .5rem;border-top:1px solid #f0f0f0;padding-top:1rem">'
+                '<span style="font-size:.73rem;font-weight:600;color:#a1a1aa;'
+                'text-transform:uppercase;letter-spacing:.06em">Or fill in individually</span>'
+                '</div>', unsafe_allow_html=True)
+
+    # ── Individual fields ─────────────────────────────────────────────────────
     c1, c2 = st.columns(2)
     with c1:
-        s_addr1   = st.text_input("Address Line 1", placeholder="123 Main St")
-        s_addr2   = st.text_input("Address Line 2", placeholder="Suite 400")
-        s_addr3   = st.text_input("Address Line 3", placeholder="")
-        s_city    = st.text_input("City",           placeholder="Calgary")
+        s_addr1   = st.text_input("Address Line 1", placeholder="123 Main St",  key="s_a1")
+        s_addr2   = st.text_input("Address Line 2", placeholder="Suite 400",    key="s_a2")
+        s_city    = st.text_input("City",           placeholder="Calgary",       key="s_ci")
     with c2:
-        s_state   = st.text_input("State / Province / Region", placeholder="AB")
-        s_country = st.text_input("Country",        placeholder="Canada")
-        s_postal  = st.text_input("Postal / ZIP Code", placeholder="T3M 0V4")
+        s_state   = st.text_input("State / Province", placeholder="AB",         key="s_st")
+        s_country = st.text_input("Country",          placeholder="Canada",      key="s_co")
+        s_postal  = st.text_input("Postal / ZIP Code", placeholder="T3M 0V4",   key="s_po")
 
-    run_single = st.button("Correct this address", type="primary", use_container_width=True)
+    run_single = st.button("Correct this address", type="primary",
+                           use_container_width=True, key="btn_single")
     st.markdown('</div>', unsafe_allow_html=True)
 
     if run_single:
-        st.session_state["single_result"] = _run_single_correction(
-            s_addr1, s_addr2, s_addr3, s_city, s_state, s_country, s_postal
-        )
+        # Prefer the free-text box; fall back to individual fields
+        if full_addr.strip():
+            p_a1, p_a2, p_a3, p_city, p_state, p_country, p_postal = \
+                _parse_full_address(full_addr.strip())
+            st.session_state["single_result"] = _run_single_correction(
+                p_a1, p_a2, p_a3, p_city, p_state, p_country, p_postal
+            )
+        else:
+            st.session_state["single_result"] = _run_single_correction(
+                s_addr1, s_addr2, "", s_city, s_state, s_country, s_postal
+            )
 
-    # Show result card (persists across reruns via session_state)
     if "single_result" in st.session_state:
         _render_single_result(st.session_state["single_result"])
 
