@@ -2,6 +2,7 @@ import io
 import os
 import importlib
 import pandas as pd
+import pycountry as _pycountry
 import streamlit as st
 
 # Force fresh import every deploy — prevents Streamlit Cloud from serving stale module
@@ -660,6 +661,42 @@ def _run_single_correction(addr1, addr2, addr3, city, state, country, postal, us
     return originals, corrected
 
 
+def _country_full_name(code: str) -> str:
+    """Convert ISO alpha-2 country code to full English name, e.g. 'US' → 'United States'."""
+    if not code:
+        return ""
+    try:
+        c = _pycountry.countries.get(alpha_2=code.strip().upper())
+        return c.name if c else code.upper()
+    except Exception:
+        return code.upper()
+
+
+def _build_letter_lines(corrected: dict) -> list[str]:
+    """Return address lines formatted like a mailing label."""
+    lines = []
+    for f in ["Address Line 1", "Address Line 2", "Address Line 3"]:
+        v = (corrected.get(f) or "").strip()
+        if v:
+            lines.append(v)
+    city    = (corrected.get("City")        or "").strip()
+    state   = (corrected.get("State")       or "").strip()
+    postal  = (corrected.get("Postal Code") or "").strip()
+    country = (corrected.get("Country")     or "").strip()
+
+    city_line = ", ".join(filter(None, [city, state]))
+    if postal:
+        city_line = f"{city_line} {postal}".strip() if city_line else postal
+    if city_line:
+        lines.append(city_line)
+
+    country_name = _country_full_name(country) if len(country) == 2 else country
+    if country_name:
+        lines.append(country_name)
+
+    return lines
+
+
 def _render_single_result(payload):
     originals, corrected = payload
     field_order = ["Address Line 1", "Address Line 2", "Address Line 3",
@@ -699,6 +736,22 @@ def _render_single_result(payload):
             f'{orig_cell}</div>'
         )
 
+    # ── Letter-style formatted address block ────────────────────────────────────
+    letter_lines = _build_letter_lines(corrected)
+    letter_html  = "".join(
+        f'<div style="font-size:1rem;font-weight:{"700" if i==0 else "400"};'
+        f'color:#111118;line-height:1.65">{ln}</div>'
+        for i, ln in enumerate(letter_lines)
+    )
+    letter_block = (
+        f'<div style="background:#f8f7ff;border:1.5px solid #6c47ff33;border-radius:12px;'
+        f'padding:1.1rem 1.4rem;margin-bottom:1.2rem;font-family:\'Courier New\',monospace">'
+        f'<div style="font-size:.68rem;font-weight:700;letter-spacing:.1em;color:#6c47ff;'
+        f'text-transform:uppercase;margin-bottom:.65rem">📬 Formatted Address</div>'
+        f'{letter_html}'
+        f'</div>'
+    ) if letter_lines else ""
+
     # ── Single combined markdown (avoids unclosed-tag rendering bugs) ──────────
     clean_badge = ('<div style="display:inline-flex;align-items:center;gap:.4rem;'
                    'background:#f0fdf4;border:1px solid #bbf7d0;border-radius:100px;'
@@ -715,6 +768,7 @@ def _render_single_result(payload):
         f'padding:1.4rem 1.8rem;margin-bottom:1rem">'
         f'<div style="font-size:.72rem;font-weight:700;letter-spacing:.08em;'
         f'color:#6c47ff;text-transform:uppercase;margin-bottom:1.1rem">Corrected Address</div>'
+        f'{letter_block}'
         f'{rows_html}'
         f'{summary}'
         f'</div>'
@@ -746,7 +800,7 @@ def _render_single_result(payload):
         **{f"Original {k}": v for k, v in originals.items()},
         **{f"Corrected {k}": v for k, v in corrected.items()},
     }])
-    _dl1, _dl2, _dl3 = st.columns([2, 2, 5])
+    _dl1, _dl2, _dl3, _dl4 = st.columns([2, 2, 2, 3])
     with _dl1:
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -760,6 +814,12 @@ def _render_single_result(payload):
         st.download_button("⬇  CSV (.csv)",
                            export_df.to_csv(index=False).encode("utf-8-sig"),
                            "corrected_address.csv", "text/csv",
+                           use_container_width=True)
+    with _dl3:
+        plain_text = "\n".join(letter_lines)
+        st.download_button("⬇  Plain text",
+                           plain_text.encode("utf-8"),
+                           "corrected_address.txt", "text/plain",
                            use_container_width=True)
 
 
