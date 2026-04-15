@@ -918,6 +918,12 @@ with tab_single:
                 'text-transform:uppercase;letter-spacing:.06em">Or fill in individually</span>'
                 '</div>', unsafe_allow_html=True)
 
+    # ── Apply any auto-corrections back into the input fields ────────────────
+    # These were set by the correction engine on the previous run and are
+    # flushed into the widget keys here before widgets render.
+    for _k, _v in st.session_state.pop("_field_corrections", {}).items():
+        st.session_state[_k] = _v
+
     # ── Individual fields ─────────────────────────────────────────────────────
     c1, c2 = st.columns(2)
     with c1:
@@ -959,12 +965,31 @@ with tab_single:
 
     if _has_content:
         if full_addr.strip():
-            _parsed     = _parse_full_address(full_addr.strip())
+            _parsed      = _parse_full_address(full_addr.strip())
             _auto_result = _run_single_correction(*_parsed, use_ai=False)
         else:
             _auto_result = _run_single_correction(
                 s_addr1, s_addr2, "", s_city, s_state, s_country, s_postal, use_ai=False
             )
+
+        # ── Push corrected values back into the input fields ──────────────────
+        if _auto_result and not full_addr.strip():
+            _, _corr = _auto_result
+            _field_map = {
+                "s_a1": ("Address Line 1", s_addr1),
+                "s_ci": ("City",           s_city),
+                "s_st": ("State",          s_state),
+                "s_co": ("Country",        s_country),
+                "s_po": ("Postal Code",    s_postal),
+            }
+            _updates = {}
+            for _key, (_field, _raw) in _field_map.items():
+                _cv = (_corr.get(_field) or "").strip()
+                if _cv and _cv.upper() != _raw.strip().upper():
+                    _updates[_key] = _cv
+            if _updates:
+                st.session_state["_field_corrections"] = _updates
+                st.rerun()
     else:
         _auto_result = None
 
