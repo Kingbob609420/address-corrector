@@ -1,4 +1,5 @@
 import io
+import os
 import importlib
 import pandas as pd
 import streamlit as st
@@ -14,6 +15,55 @@ from address_corrector import (
     _US_STATE_CODES, _NULL_PLACEHOLDERS, _STATE_CODE_TO_COUNTRY,
     _COUNTRY_NAME_INDEX, _STATE_FUZZY_INDEX,
 )
+
+
+# ── AI street-name spell-checker ──────────────────────────────────────────────
+def _ai_correct_street(line: str) -> str:
+    """
+    Use Claude claude-haiku-3-5 to fix misspelled words in a street address line.
+    Falls back to the original value silently if no API key or any error.
+    """
+    if not line or not str(line).strip():
+        return line
+    try:
+        import anthropic  # type: ignore
+
+        # Resolve API key: Streamlit Cloud secrets → env var
+        api_key = ""
+        try:
+            api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+        except Exception:
+            pass
+        if not api_key:
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return line  # No key available — skip silently
+
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-haiku-3-5",
+            max_tokens=150,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Fix ONLY misspelled street name words in this address line. "
+                    "Do NOT change the building/house number at the start. "
+                    "Do NOT alter standard road-type abbreviations "
+                    "(DR, ST, AVE, BLVD, RD, LN, CT, PL, WAY, HWY, CIR, TER, etc.). "
+                    "If nothing looks misspelled, return it exactly as given. "
+                    "Return ONLY the corrected address line — no explanation, no punctuation changes.\n\n"
+                    f"Address: {line}"
+                ),
+            }],
+        )
+        result = msg.content[0].text.strip()
+        # Safety guard: if AI returns something wildly different in length, keep original
+        if result and 0.5 < len(result) / max(len(str(line)), 1) < 2.5:
+            return result
+        return line
+    except Exception:
+        return line  # Any failure → return unchanged
+
 
 st.set_page_config(
     page_title="Address Corrector",
@@ -543,7 +593,7 @@ def _parse_full_address(text):
     return addr1, addr2, addr3, city, state, country, postal
 
 
-def _run_single_correction(addr1, addr2, addr3, city, state, country, postal):
+def _run_single_correction(addr1, addr2, addr3, city, state, country, postal, use_ai=False):
     """Apply all corrections to a single address and return (original, corrected) dicts."""
     _null_upper = {s.upper() for s in _NULL_PLACEHOLDERS}
 
@@ -551,6 +601,12 @@ def _run_single_correction(addr1, addr2, addr3, city, state, country, postal):
     c_addr1  = correct_address_line(addr1)
     c_addr2  = correct_address_line(addr2)
     c_addr3  = correct_address_line(addr3)
+
+    # Step 1b — AI spell-check street name words (optional)
+    if use_ai:
+        c_addr1 = _ai_correct_street(c_addr1) if c_addr1 else c_addr1
+        c_addr2 = _ai_correct_street(c_addr2) if c_addr2 else c_addr2
+        c_addr3 = _ai_correct_street(c_addr3) if c_addr3 else c_addr3
     c_city   = correct_city(city)
     c_postal = correct_postal_code(postal)
     c_country = correct_country(country)
@@ -739,6 +795,13 @@ with tab_single:
         s_country = st.text_input("Country",          placeholder="Canada",      key="s_co")
         s_postal  = st.text_input("Postal / ZIP Code", placeholder="T3M 0V4",   key="s_po")
 
+    use_ai_single = st.checkbox(
+        "🤖 AI spell-check street names",
+        value=True,
+        key="single_ai_fix",
+        help="Uses Claude AI to fix misspelled street name words (e.g. 'Plmdal' → 'Palmdale'). "
+             "Requires ANTHROPIC_API_KEY to be set.",
+    )
     run_single = st.button("Correct this address", type="primary",
                            use_container_width=True, key="btn_single")
     st.markdown('</div>', unsafe_allow_html=True)
@@ -748,13 +811,17 @@ with tab_single:
         if full_addr.strip():
             p_a1, p_a2, p_a3, p_city, p_state, p_country, p_postal = \
                 _parse_full_address(full_addr.strip())
-            st.session_state["single_result"] = _run_single_correction(
-                p_a1, p_a2, p_a3, p_city, p_state, p_country, p_postal
-            )
+            with st.spinner("Correcting address…"):
+                st.session_state["single_result"] = _run_single_correction(
+                    p_a1, p_a2, p_a3, p_city, p_state, p_country, p_postal,
+                    use_ai=use_ai_single,
+                )
         else:
-            st.session_state["single_result"] = _run_single_correction(
-                s_addr1, s_addr2, "", s_city, s_state, s_country, s_postal
-            )
+            with st.spinner("Correcting address…"):
+                st.session_state["single_result"] = _run_single_correction(
+                    s_addr1, s_addr2, "", s_city, s_state, s_country, s_postal,
+                    use_ai=use_ai_single,
+                )
 
     if "single_result" in st.session_state:
         _render_single_result(st.session_state["single_result"])
@@ -845,6 +912,18 @@ if df_raw is not None and len(df_raw) > 0:
         </div>""", unsafe_allow_html=True)
         st.stop()
 
+    # ── AI street-name spell-check toggle ────────────────────────────────────
+    use_ai_bulk = st.checkbox(
+        "🤖 AI spell-check street names",
+        value=False,
+        key="bulk_ai_fix",
+        help="Uses Claude AI to fix misspelled street name words row-by-row. "
+             "Adds ~1–2 s per row — best for smaller files (<200 rows). "
+             "Requires ANTHROPIC_API_KEY to be set.",
+    )
+    if use_ai_bulk and len(df_raw) > 200:
+        st.warning(f"⚠ AI spell-check is enabled on {len(df_raw):,} rows. This may take several minutes.")
+
     # Corrections
     result = df_raw.copy()
     corrected_col_map = {}
@@ -857,6 +936,18 @@ if df_raw is not None and len(df_raw) > 0:
 
     # Auto-fix country & state from postal code + company name hints
     apply_autofix(result, col_map)
+
+    # AI spell-check street name columns (bulk)
+    if use_ai_bulk:
+        addr_fields = ["address_line_1", "address_line_2", "address_line_3"]
+        addr_labels = [f"Corrected {DISPLAY_LABELS[f]}" for f in addr_fields
+                       if col_map.get(f) and f"Corrected {DISPLAY_LABELS[f]}" in result.columns]
+        if addr_labels:
+            with st.spinner(f"Running AI street spell-check on {len(df_raw):,} rows…"):
+                for lbl in addr_labels:
+                    result[lbl] = result[lbl].apply(
+                        lambda v: _ai_correct_street(str(v)) if pd.notna(v) and str(v).strip() else v
+                    )
 
     # Stats
     per_field, total_changed = {}, 0
