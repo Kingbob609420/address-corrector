@@ -891,6 +891,155 @@ def infer_province_from_canadian_postal(postal: str) -> str | None:
     return _CA_FSA_PROVINCE.get(first)
 
 
+# ── US ZIP prefix (first 3 digits) → state code ───────────────────────────────
+# Allows state validation/correction when a US ZIP code is present.
+_ZIP_PREFIX_TO_STATE: dict[str, str] = {
+    # Connecticut
+    **{p: "CT" for p in ["060","061","062","063","064","065","066","067","068","069"]},
+    # Maine
+    **{p: "ME" for p in ["039","040","041","042","043","044","045","046","047","048","049"]},
+    # Massachusetts
+    **{p: "MA" for p in ["010","011","012","013","014","015","016","017","018","019",
+                          "020","021","022","023","024","025","026","027"]},
+    # New Hampshire
+    **{p: "NH" for p in ["030","031","032","033","034","035","036","037","038"]},
+    # Rhode Island
+    **{p: "RI" for p in ["028","029"]},
+    # Vermont
+    **{p: "VT" for p in ["050","051","052","053","054","055","056","057","058","059"]},
+    # New Jersey
+    **{p: "NJ" for p in ["070","071","072","073","074","075","076","077","078","079",
+                          "080","081","082","083","084","085","086","087","088","089"]},
+    # New York
+    **{p: "NY" for p in [f"{n:03d}" for n in range(100, 150)]},
+    # Pennsylvania
+    **{p: "PA" for p in [f"{n:03d}" for n in range(150, 197)]},
+    # Delaware
+    **{p: "DE" for p in ["197","198","199"]},
+    # Washington DC
+    **{p: "DC" for p in ["200","201","202","203","204","205"]},
+    # Maryland
+    **{p: "MD" for p in ["206","207","208","209","210","211","212","214","215","216","217","218","219"]},
+    # Virginia
+    **{p: "VA" for p in [f"{n:03d}" for n in range(220, 247)]},
+    # West Virginia
+    **{p: "WV" for p in [f"{n:03d}" for n in range(247, 269)]},
+    # North Carolina
+    **{p: "NC" for p in [f"{n:03d}" for n in range(270, 290)]},
+    # South Carolina
+    **{p: "SC" for p in [f"{n:03d}" for n in range(290, 300)]},
+    # Georgia
+    **{p: "GA" for p in [f"{n:03d}" for n in range(300, 320)] + ["398","399"]},
+    # Florida
+    **{p: "FL" for p in ["320","321","322","323","324","325","326","327","328","329",
+                          "330","331","332","333","334","335","336","337","338","339",
+                          "341","342","344","346","347","349"]},
+    # Alabama
+    **{p: "AL" for p in ["350","351","352","354","355","356","357","358","359",
+                          "360","361","362","363","364","365","366","367","368","369"]},
+    # Tennessee
+    **{p: "TN" for p in ["370","371","372","373","374","375","376","377","378","379",
+                          "380","381","382","383","384","385"]},
+    # Mississippi
+    **{p: "MS" for p in [f"{n:03d}" for n in range(386, 398)]},
+    # Kentucky
+    **{p: "KY" for p in ["400","401","402","403","404","405","406","407","408","409",
+                          "410","411","412","413","414","415","416","417","418",
+                          "420","421","422","423","424","425","426","427"]},
+    # Ohio
+    **{p: "OH" for p in [f"{n:03d}" for n in range(430, 459)]},
+    # Indiana
+    **{p: "IN" for p in [f"{n:03d}" for n in range(460, 480)]},
+    # Michigan
+    **{p: "MI" for p in [f"{n:03d}" for n in range(480, 500)]},
+    # Iowa
+    **{p: "IA" for p in ["500","501","502","503","504","505","506","507","508",
+                          "510","511","512","513","514","515","516",
+                          "520","521","522","523","524","525","526","527","528"]},
+    # Wisconsin
+    **{p: "WI" for p in ["530","531","532","534","535","537","538","539",
+                          "540","541","542","543","544","545","546","547","548","549"]},
+    # Minnesota
+    **{p: "MN" for p in ["550","551","553","554","555","556","557","558","559",
+                          "560","561","562","563","564","565","566","567"]},
+    # South Dakota
+    **{p: "SD" for p in ["570","571","572","573","574","575","576","577"]},
+    # North Dakota
+    **{p: "ND" for p in ["580","581","582","583","584","585","586","587","588"]},
+    # Montana
+    **{p: "MT" for p in [f"{n:03d}" for n in range(590, 600)]},
+    # Illinois
+    **{p: "IL" for p in [f"{n:03d}" for n in range(600, 630)]},
+    # Missouri
+    **{p: "MO" for p in ["630","631","633","634","635","636","637","638","639",
+                          "640","641","644","645","646","647","648",
+                          "650","651","652","653","654","655","656","657","658"]},
+    # Kansas
+    **{p: "KS" for p in ["660","661","662","664","665","666","667","668","669",
+                          "670","671","672","673","674","675","676","677","678","679"]},
+    # Nebraska
+    **{p: "NE" for p in ["680","681","683","684","685","686","687","688","689",
+                          "690","691","692","693"]},
+    # Louisiana
+    **{p: "LA" for p in ["700","701","703","704","705","706","707","708",
+                          "710","711","712","713","714"]},
+    # Arkansas
+    **{p: "AR" for p in ["716","717","718","719","720","721","722","723","724","725","726","727","728","729"]},
+    # Oklahoma
+    **{p: "OK" for p in ["730","731","734","735","736","737","738","739",
+                          "740","741","743","744","745","746","747","748","749"]},
+    # Texas
+    **{p: "TX" for p in [f"{n:03d}" for n in range(750, 800)] + ["885"]},
+    # Colorado
+    **{p: "CO" for p in [f"{n:03d}" for n in range(800, 817)]},
+    # Wyoming
+    **{p: "WY" for p in ["820","821","822","823","824","825","826","827","828","829","830","831"]},
+    # Idaho
+    **{p: "ID" for p in ["832","833","834","835","836","837","838"]},
+    # Utah
+    **{p: "UT" for p in ["840","841","842","843","844","845","846","847"]},
+    # Arizona
+    **{p: "AZ" for p in ["850","851","852","853","855","856","857","859",
+                          "860","863","864","865"]},
+    # New Mexico
+    **{p: "NM" for p in ["870","871","872","873","874","875","877","878","879",
+                          "880","881","882","883","884"]},
+    # Nevada
+    **{p: "NV" for p in ["889","890","891","893","894","895","897","898"]},
+    # Hawaii
+    **{p: "HI" for p in ["967","968"]},
+    # California
+    **{p: "CA" for p in [f"{n:03d}" for n in
+                          list(range(900, 909)) + list(range(910, 962)) if n not in [909,929]]},
+    # Oregon
+    **{p: "OR" for p in [f"{n:03d}" for n in range(970, 980)]},
+    # Washington
+    **{p: "WA" for p in ["980","981","982","983","984","985","986","988","989",
+                          "990","991","992","993","994"]},
+    # Alaska
+    **{p: "AK" for p in [f"{n:03d}" for n in range(995, 1000)]},
+    # Puerto Rico
+    **{p: "PR" for p in ["006","007","008","009"]},
+    # Guam
+    "969": "GU",
+    # APO/FPO
+    **{p: "AE" for p in ["090","091","092","093","094","095","096","097","098"]},
+}
+
+
+def infer_us_state_from_zip(postal: str) -> str:
+    """
+    Return the expected US state code from a 5-digit ZIP code's first 3 digits.
+    Returns "" if the ZIP is not a recognised US format.
+    """
+    if not postal:
+        return ""
+    digits = postal.strip().replace("-", "")[:5]
+    if len(digits) < 3 or not digits.isdigit():
+        return ""
+    return _ZIP_PREFIX_TO_STATE.get(digits[:3], "")
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # CORRECTION DISPATCH
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1115,7 +1264,13 @@ def apply_autofix(result: "pd.DataFrame", col_map: dict) -> None:
             if prov and (not state or state in _US_STATE_CODES or state.upper() in _null_upper):
                 state = prov
 
-        # ── Signal 4b: Australian state — infer country if not already CA/GB ──
+        # ── Signal 5: US state from ZIP prefix (corrects wrong state codes) ───
+        if country == "US":
+            expected_state = infer_us_state_from_zip(postal)
+            if expected_state and expected_state != state:
+                state = expected_state
+
+        # ── Signal 6: Australian state — infer country if not already CA/GB ──
         if state.upper() in AU_STATE_CODES and country not in ("CA", "GB", "US"):
             if not postal_inferred:
                 country = "AU"

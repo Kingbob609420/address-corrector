@@ -10,7 +10,7 @@ import re as _re
 from address_corrector import (
     CORRECTORS, DISPLAY_LABELS, _detect_columns, _write_excel, apply_autofix,
     correct_address_line, correct_city, correct_state, correct_country, correct_postal_code,
-    detect_country_from_postal, infer_province_from_canadian_postal,
+    detect_country_from_postal, infer_province_from_canadian_postal, infer_us_state_from_zip,
     _US_STATE_CODES, _NULL_PLACEHOLDERS, _STATE_CODE_TO_COUNTRY,
     _COUNTRY_NAME_INDEX, _STATE_FUZZY_INDEX,
 )
@@ -575,6 +575,12 @@ def _run_single_correction(addr1, addr2, addr3, city, state, country, postal):
         prov = infer_province_from_canadian_postal(c_postal)
         if prov and (not c_state or c_state in _US_STATE_CODES):
             c_state = prov
+
+    # Step 4b — correct US state from ZIP prefix (overrides wrong state entry)
+    if c_country == "US":
+        expected_state = infer_us_state_from_zip(c_postal)
+        if expected_state and expected_state != c_state:
+            c_state = expected_state
 
     # Step 5 — re-correct state now we know the definitive country
     #          (e.g. user typed "Ontario" → correct_state already gave "ON",
