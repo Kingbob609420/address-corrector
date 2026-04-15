@@ -862,36 +862,53 @@ with tab_single:
         s_country = st.text_input("Country",          placeholder="Canada",      key="s_co")
         s_postal  = st.text_input("Postal / ZIP Code", placeholder="T3M 0V4",   key="s_po")
 
+    # ── Auto-correct on every keystroke (no button needed for basic correction) ──
+    _current_inputs = (full_addr, s_addr1, s_addr2, s_city, s_state, s_country, s_postal)
+    _has_content    = any(v.strip() for v in _current_inputs)
+
+    if _has_content:
+        if full_addr.strip():
+            _parsed     = _parse_full_address(full_addr.strip())
+            _auto_result = _run_single_correction(*_parsed, use_ai=False)
+        else:
+            _auto_result = _run_single_correction(
+                s_addr1, s_addr2, "", s_city, s_state, s_country, s_postal, use_ai=False
+            )
+    else:
+        _auto_result = None
+
+    # Clear cached AI result whenever inputs change
+    if st.session_state.get("_single_ai_inputs") != _current_inputs:
+        st.session_state.pop("_single_ai_result", None)
+
+    # ── AI spell-check button (optional, only needed for street name fixing) ────
     use_ai_single = st.checkbox(
         "🤖 AI spell-check street names",
-        value=True,
+        value=False,
         key="single_ai_fix",
-        help="Uses Claude AI to fix misspelled street name words (e.g. 'Plmdal' → 'Palmdale'). "
+        help="Uses AI to fix misspelled street name words (e.g. 'Plmdal' → 'Palmdale'). "
              "Requires OPENAI_API_KEY to be set.",
     )
-    run_single = st.button("Correct this address", type="primary",
-                           use_container_width=True, key="btn_single")
+    if use_ai_single:
+        if st.button("Apply AI spell-check", type="primary",
+                     use_container_width=True, key="btn_single"):
+            if _has_content:
+                with st.spinner("Running AI spell-check…"):
+                    if full_addr.strip():
+                        _ai_res = _run_single_correction(*_parse_full_address(full_addr.strip()), use_ai=True)
+                    else:
+                        _ai_res = _run_single_correction(
+                            s_addr1, s_addr2, "", s_city, s_state, s_country, s_postal, use_ai=True
+                        )
+                st.session_state["_single_ai_result"] = _ai_res
+                st.session_state["_single_ai_inputs"] = _current_inputs
+
     st.markdown('</div>', unsafe_allow_html=True)
 
-    if run_single:
-        # Prefer the free-text box; fall back to individual fields
-        if full_addr.strip():
-            p_a1, p_a2, p_a3, p_city, p_state, p_country, p_postal = \
-                _parse_full_address(full_addr.strip())
-            with st.spinner("Correcting address…"):
-                st.session_state["single_result"] = _run_single_correction(
-                    p_a1, p_a2, p_a3, p_city, p_state, p_country, p_postal,
-                    use_ai=use_ai_single,
-                )
-        else:
-            with st.spinner("Correcting address…"):
-                st.session_state["single_result"] = _run_single_correction(
-                    s_addr1, s_addr2, "", s_city, s_state, s_country, s_postal,
-                    use_ai=use_ai_single,
-                )
-
-    if "single_result" in st.session_state:
-        _render_single_result(st.session_state["single_result"])
+    # Show AI result if available for current inputs, otherwise show live auto result
+    _display_result = st.session_state.get("_single_ai_result") or _auto_result
+    if _display_result:
+        _render_single_result(_display_result)
 
 # ── Tab 2: Bulk input (paste + upload) ───────────────────────────────────────
 with tab_bulk:
