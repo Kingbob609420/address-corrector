@@ -585,11 +585,20 @@ def _parse_full_address(text):
 
     # ── 4. Remaining → last unused = city, earlier unused = address lines ────────
     remaining = [parts[i] for i in range(len(parts)) if not used[i]]
-    city      = remaining[-1]        if remaining          else ""
-    addr_parts = remaining[:-1]      if len(remaining) > 1 else []
-    addr1     = addr_parts[0]        if len(addr_parts) > 0 else ""
-    addr2     = addr_parts[1]        if len(addr_parts) > 1 else ""
-    addr3     = ", ".join(addr_parts[2:]) if len(addr_parts) > 2 else ""
+    # If only one part left and it looks like a street (starts with digit or
+    # contains a street keyword), treat it as addr1 — not city.
+    _street_re = _re.compile(
+        r"^\d|(\b(st|street|ave|avenue|blvd|boulevard|dr|drive|rd|road|"
+        r"ln|lane|ct|court|pl|place|way|hwy|highway|cir|circle)\b)", _re.I
+    )
+    if len(remaining) == 1 and _street_re.search(remaining[0]):
+        addr1, addr2, addr3, city = remaining[0], "", "", ""
+    else:
+        city      = remaining[-1]             if remaining          else ""
+        addr_parts = remaining[:-1]           if len(remaining) > 1 else []
+        addr1     = addr_parts[0]             if len(addr_parts) > 0 else ""
+        addr2     = addr_parts[1]             if len(addr_parts) > 1 else ""
+        addr3     = ", ".join(addr_parts[2:]) if len(addr_parts) > 2 else ""
 
     return addr1, addr2, addr3, city, state, country, postal
 
@@ -743,12 +752,24 @@ def _render_single_result(payload):
         f'color:#111118;line-height:1.65">{ln}</div>'
         for i, ln in enumerate(letter_lines)
     )
+    # Show hint for missing fields so user knows what to add
+    _missing = []
+    if not (corrected.get("City") or "").strip():    _missing.append("City")
+    if not (corrected.get("State") or "").strip():   _missing.append("State")
+    if not (corrected.get("Postal Code") or "").strip(): _missing.append("ZIP Code")
+    _hint_html = (
+        f'<div style="margin-top:.6rem;font-size:.75rem;color:#a16207;'
+        f'background:#fefce8;border-radius:6px;padding:.3rem .6rem">'
+        f'💡 Also fill in: <b>{", ".join(_missing)}</b> to complete the address</div>'
+    ) if _missing and letter_lines else ""
+
     letter_block = (
         f'<div style="background:#f8f7ff;border:1.5px solid #6c47ff33;border-radius:12px;'
         f'padding:1.1rem 1.4rem;margin-bottom:1.2rem;font-family:\'Courier New\',monospace">'
         f'<div style="font-size:.68rem;font-weight:700;letter-spacing:.1em;color:#6c47ff;'
         f'text-transform:uppercase;margin-bottom:.65rem">📬 Formatted Address</div>'
         f'{letter_html}'
+        f'{_hint_html}'
         f'</div>'
     ) if letter_lines else ""
 
