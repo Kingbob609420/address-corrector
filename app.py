@@ -627,7 +627,7 @@ def _run_single_correction(addr1, addr2, addr3, city, state, country, postal, us
         if state_country:
             c_country = state_country
 
-    # Step 3b — if state is a known US state code and country is still unknown, assume US
+    # Step 3b — US state code with blank country → assume US
     if not c_country and c_state and c_state.upper() in _US_STATE_CODES:
         c_country = "US"
 
@@ -637,14 +637,14 @@ def _run_single_correction(addr1, addr2, addr3, city, state, country, postal, us
         if prov and (not c_state or c_state in _US_STATE_CODES):
             c_state = prov
 
-    # Step 4b — correct/infer state from US ZIP prefix
-    # Fires when country is US OR country is blank (user didn't enter one).
-    # This handles the common case: state entered wrong, no country typed.
+    # Step 4b — authoritative US state from ZIP prefix
+    # Fires when: country is US, OR country is blank, OR state is a US code.
+    # This is the final word — overrides any wrong state the user entered.
     zip_state = infer_us_state_from_zip(c_postal)
-    if zip_state and c_country in ("US", ""):
-        if zip_state != c_state:
-            c_state = zip_state
-        c_country = "US"  # confirm country while we're at it
+    _is_us = c_country == "US" or c_country == "" or c_state.upper() in _US_STATE_CODES
+    if zip_state and _is_us:
+        c_state   = zip_state
+        c_country = "US"
 
     # Step 5 — re-correct state now we know the definitive country
     #          (e.g. user typed "Ontario" → correct_state already gave "ON",
