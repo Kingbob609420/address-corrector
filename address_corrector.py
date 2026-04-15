@@ -1249,6 +1249,12 @@ def apply_autofix(result: "pd.DataFrame", col_map: dict) -> None:
                 if not postal_inferred:
                     country = state_country
 
+        # ── Signal 2b: US state code → assume US when country still unknown ──
+        # US codes are intentionally absent from _STATE_CODE_TO_COUNTRY (to avoid
+        # false overrides), so we check _US_STATE_CODES separately here.
+        if not country and state and state.upper() in _US_STATE_CODES:
+            country = "US"
+
         # ── Signal 3: company/vendor name ────────────────────────────────────
         if name_col:
             company = str(row.get(name_col) or "").strip()

@@ -626,6 +626,12 @@ def _run_single_correction(addr1, addr2, addr3, city, state, country, postal, us
         if state_country:
             c_country = state_country
 
+    # Step 3b — if state is a US state code and country still unknown, assume US
+    #            (US codes intentionally excluded from _STATE_CODE_TO_COUNTRY to avoid
+    #             false overrides, so we handle them separately here)
+    if not c_country and c_state and c_state.upper() in _US_STATE_CODES:
+        c_country = "US"
+
     # Step 4 — infer province from Canadian FSA when country is CA
     if c_country == "CA":
         prov = infer_province_from_canadian_postal(c_postal)
