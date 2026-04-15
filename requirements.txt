@@ -3,4 +3,4 @@ openpyxl
 streamlit
 pycountry
 geonamescache
-anthropic
+openai

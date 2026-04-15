@@ -20,28 +20,28 @@ from address_corrector import (
 # ── AI street-name spell-checker ──────────────────────────────────────────────
 def _ai_correct_street(line: str) -> str:
     """
-    Use Claude claude-haiku-3-5 to fix misspelled words in a street address line.
+    Use OpenAI gpt-4o-mini to fix misspelled words in a street address line.
     Falls back to the original value silently if no API key or any error.
     """
     if not line or not str(line).strip():
         return line
     try:
-        import anthropic  # type: ignore
+        from openai import OpenAI  # type: ignore
 
         # Resolve API key: Streamlit Cloud secrets → env var
         api_key = ""
         try:
-            api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+            api_key = st.secrets.get("OPENAI_API_KEY", "")
         except Exception:
             pass
         if not api_key:
-            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            api_key = os.environ.get("OPENAI_API_KEY", "")
         if not api_key:
             return line  # No key available — skip silently
 
-        client = anthropic.Anthropic(api_key=api_key)
-        msg = client.messages.create(
-            model="claude-haiku-3-5",
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
             max_tokens=150,
             messages=[{
                 "role": "user",
@@ -56,7 +56,7 @@ def _ai_correct_street(line: str) -> str:
                 ),
             }],
         )
-        result = msg.content[0].text.strip()
+        result = response.choices[0].message.content.strip()
         # Safety guard: if AI returns something wildly different in length, keep original
         if result and 0.5 < len(result) / max(len(str(line)), 1) < 2.5:
             return result
@@ -800,7 +800,7 @@ with tab_single:
         value=True,
         key="single_ai_fix",
         help="Uses Claude AI to fix misspelled street name words (e.g. 'Plmdal' → 'Palmdale'). "
-             "Requires ANTHROPIC_API_KEY to be set.",
+             "Requires OPENAI_API_KEY to be set.",
     )
     run_single = st.button("Correct this address", type="primary",
                            use_container_width=True, key="btn_single")
@@ -919,7 +919,7 @@ if df_raw is not None and len(df_raw) > 0:
         key="bulk_ai_fix",
         help="Uses Claude AI to fix misspelled street name words row-by-row. "
              "Adds ~1–2 s per row — best for smaller files (<200 rows). "
-             "Requires ANTHROPIC_API_KEY to be set.",
+             "Requires OPENAI_API_KEY to be set.",
     )
     if use_ai_bulk and len(df_raw) > 200:
         st.warning(f"⚠ AI spell-check is enabled on {len(df_raw):,} rows. This may take several minutes.")
