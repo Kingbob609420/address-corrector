@@ -1271,10 +1271,13 @@ def apply_autofix(result: "pd.DataFrame", col_map: dict) -> None:
                 state = prov
 
         # ── Signal 5: US state from ZIP prefix (corrects wrong state codes) ───
-        if country == "US":
-            expected_state = infer_us_state_from_zip(postal)
-            if expected_state and expected_state != state:
-                state = expected_state
+        # Also fires when country is blank — covers the common case where no
+        # country column exists but a plain 5-digit US ZIP is present.
+        zip_state = infer_us_state_from_zip(postal)
+        if zip_state and country in ("US", ""):
+            if zip_state != state:
+                state = zip_state
+            country = "US"  # confirm country too
 
         # ── Signal 6: Australian state — infer country if not already CA/GB ──
         if state.upper() in AU_STATE_CODES and country not in ("CA", "GB", "US"):
