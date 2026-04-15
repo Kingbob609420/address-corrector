@@ -1,6 +1,9 @@
 import io
 import os
+import json
 import importlib
+import urllib.request
+import urllib.parse
 import pandas as pd
 import pycountry as _pycountry
 import streamlit as st
@@ -16,6 +19,49 @@ from address_corrector import (
     _US_STATE_CODES, _NULL_PLACEHOLDERS, _STATE_CODE_TO_COUNTRY,
     _COUNTRY_NAME_INDEX, _STATE_FUZZY_INDEX,
 )
+
+
+# ── Geocoding (OpenStreetMap Nominatim — free, no key required) ───────────────
+def _geocode(query: str) -> dict:
+    """
+    Look up an address via Nominatim and return a dict with:
+      city, state (2-letter code), country (2-letter code), postcode
+    Returns empty dict on any failure.
+    """
+    if not query or not query.strip():
+        return {}
+    try:
+        params = urllib.parse.urlencode({
+            "q": query.strip(),
+            "format": "json",
+            "addressdetails": 1,
+            "limit": 1,
+        })
+        url = f"https://nominatim.openstreetmap.org/search?{params}"
+        req = urllib.request.Request(url, headers={"User-Agent": "AddressCorrectorApp/1.0"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read())
+        if not data:
+            return {}
+        addr = data[0].get("address", {})
+        city    = (addr.get("city") or addr.get("town") or
+                   addr.get("village") or addr.get("municipality") or "")
+        state_full   = addr.get("state", "")
+        country_code = addr.get("country_code", "").upper()   # e.g. "US"
+        postcode     = addr.get("postcode", "").split("-")[0]  # keep first 5 digits
+
+        # Convert full state name → 2-letter code using existing corrector
+        from address_corrector import correct_state
+        state_code = correct_state(state_full, country_hint=country_code) if state_full else ""
+
+        return {
+            "city":     city.title(),
+            "state":    state_code,
+            "country":  country_code,
+            "postcode": postcode,
+        }
+    except Exception:
+        return {}
 
 
 # ── AI street-name spell-checker ──────────────────────────────────────────────
@@ -882,6 +928,30 @@ with tab_single:
         s_state   = st.text_input("State / Province", placeholder="AB",         key="s_st")
         s_country = st.text_input("Country",          placeholder="Canada",      key="s_co")
         s_postal  = st.text_input("Postal / ZIP Code", placeholder="T3M 0V4",   key="s_po")
+
+    # ── Auto-fill missing fields via geocoding ────────────────────────────────
+    # Show button when an address line exists but state/ZIP/city are blank
+    _needs_lookup = (s_addr1.strip() or full_addr.strip()) and not all(
+        [s_city.strip(), s_state.strip(), s_postal.strip()]
+    )
+    if _needs_lookup and not full_addr.strip():
+        if st.button("🔍 Auto-fill City, State & ZIP", use_container_width=True,
+                     key="btn_geocode"):
+            _query = " ".join(filter(None, [s_addr1, s_addr2, s_city, s_state, s_postal]))
+            with st.spinner("Looking up address…"):
+                _geo = _geocode(_query)
+            if _geo:
+                if _geo.get("city")     and not s_city.strip():
+                    st.session_state["s_ci"] = _geo["city"]
+                if _geo.get("state")    and not s_state.strip():
+                    st.session_state["s_st"] = _geo["state"]
+                if _geo.get("postcode") and not s_postal.strip():
+                    st.session_state["s_po"] = _geo["postcode"]
+                if _geo.get("country")  and not s_country.strip():
+                    st.session_state["s_co"] = _geo["country"]
+                st.rerun()
+            else:
+                st.warning("Couldn't find that address — try adding more detail (city, state).")
 
     # ── Auto-correct on every keystroke (no button needed for basic correction) ──
     _current_inputs = (full_addr, s_addr1, s_addr2, s_city, s_state, s_country, s_postal)
