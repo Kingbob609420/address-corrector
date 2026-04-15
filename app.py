@@ -225,8 +225,10 @@ html, body,
     flex-shrink: 0;
 }
 
-/* ══ TEXT INPUTS (single address form) ════════════════ */
-[data-testid="stTextInput"] input {
+/* ══ TEXT INPUTS ═══════════════════════════════════════ */
+[data-testid="stTextInput"] input,
+[data-testid="stTextInput"] input:not([type]),
+div[data-testid="stTextInput"] > div > div > input {
     background: #ffffff !important;
     border: 1.5px solid rgba(0,0,0,.10) !important;
     border-radius: 10px !important;
@@ -237,10 +239,12 @@ html, body,
     transition: border-color .15s, box-shadow .15s !important;
     box-shadow: 0 1px 3px rgba(0,0,0,.04) !important;
 }
-[data-testid="stTextInput"] input:focus {
+[data-testid="stTextInput"] input:focus,
+div[data-testid="stTextInput"] > div > div > input:focus {
     border-color: #6c47ff !important;
     box-shadow: 0 0 0 3px rgba(108,71,255,.12) !important;
     outline: none !important;
+    background: #ffffff !important;
 }
 [data-testid="stTextInput"] input::placeholder { color: #c4c4cc !important; }
 [data-testid="stTextInput"] label {
@@ -249,6 +253,11 @@ html, body,
     color: #71717a !important;
     letter-spacing: .02em !important;
     text-transform: uppercase !important;
+}
+/* Force white background on ALL inputs globally */
+input[type="text"], input:not([type]) {
+    background-color: #ffffff !important;
+    color: #111118 !important;
 }
 
 /* ══ PRIMARY BUTTON (purple, not red) ═════════════════ */
@@ -587,49 +596,102 @@ def _render_single_result(payload):
     field_order = ["Address Line 1", "Address Line 2", "Address Line 3",
                    "City", "State", "Country", "Postal Code"]
 
-    st.markdown('<div style="max-width:680px;margin:1.5rem auto 0">', unsafe_allow_html=True)
-    st.markdown("""
-    <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:14px;
-                padding:1.4rem 1.8rem;margin-bottom:1rem">
-        <div style="font-size:.72rem;font-weight:700;letter-spacing:.08em;
-                    color:#6c47ff;text-transform:uppercase;margin-bottom:1.1rem">
-            Corrected Address
-        </div>
-    """, unsafe_allow_html=True)
+    any_change  = False
+    rows_html   = ""
+    n_corrected = 0
 
-    any_change = False
-    rows_html  = ""
     for label in field_order:
         orig_disp = (originals.get(label) or "").strip()
         corr_disp = (corrected.get(label) or "").strip()
         if not orig_disp and not corr_disp:
             continue
-        # Case-sensitive comparison — "calgary" → "CALGARY" IS a change
-        changed = orig_disp != corr_disp and corr_disp
+        changed = orig_disp != corr_disp and bool(corr_disp)
         if changed:
-            any_change = True
-        orig_style = ("color:#a16207;background:#fefce8;padding:2px 7px;"
-                      "border-radius:4px;font-weight:500") if changed else "color:#71717a"
-        corr_style = ("color:#15803d;background:#f0fdf4;padding:2px 7px;"
-                      "border-radius:4px;font-weight:700") if changed else "color:#111118;font-weight:500"
-        arrow = '<span style="color:#c4c4cc;margin:0 5px;font-size:.8rem">→</span>' if changed else ""
-        rows_html += f"""
-        <div style="display:flex;align-items:center;gap:.5rem;padding:.5rem 0;
-                    border-bottom:1px solid #f4f4f5">
-            <span style="font-size:.71rem;color:#a1a1aa;min-width:120px;
-                         flex-shrink:0;text-transform:uppercase;letter-spacing:.04em">{label}</span>
-            <span style="font-size:.87rem;{orig_style}">{orig_disp or '<span style="color:#d4d4d8">—</span>'}</span>
-            {arrow}
-            <span style="font-size:.87rem;{corr_style}">{corr_disp or '<span style="color:#d4d4d8">—</span>'}</span>
-        </div>"""
+            any_change  = True
+            n_corrected += 1
 
-    st.markdown(rows_html + "</div></div>", unsafe_allow_html=True)
+        if changed:
+            # Amber original → green corrected
+            orig_cell = (f'<span style="font-size:.87rem;color:#a16207;background:#fefce8;'
+                         f'padding:2px 7px;border-radius:4px;font-weight:500">{orig_disp}</span>'
+                         f'<span style="color:#c4c4cc;margin:0 6px">&#8594;</span>'
+                         f'<span style="font-size:.87rem;color:#15803d;background:#f0fdf4;'
+                         f'padding:2px 7px;border-radius:4px;font-weight:700">{corr_disp}</span>')
+        else:
+            # Unchanged — show corrected value once (clean, no duplication)
+            disp = corr_disp if corr_disp else "—"
+            orig_cell = f'<span style="font-size:.87rem;color:#111118;font-weight:500">{disp}</span>'
 
-    if not any_change:
+        rows_html += (
+            f'<div style="display:flex;align-items:center;gap:.5rem;padding:.5rem 0;'
+            f'border-bottom:1px solid #f4f4f5">'
+            f'<span style="font-size:.71rem;color:#a1a1aa;min-width:120px;flex-shrink:0;'
+            f'text-transform:uppercase;letter-spacing:.04em">{label}</span>'
+            f'{orig_cell}</div>'
+        )
+
+    # ── Single combined markdown (avoids unclosed-tag rendering bugs) ──────────
+    clean_badge = ('<div style="display:inline-flex;align-items:center;gap:.4rem;'
+                   'background:#f0fdf4;border:1px solid #bbf7d0;border-radius:100px;'
+                   'padding:.25rem .75rem;font-size:.72rem;color:#16a34a;font-weight:600">'
+                   '✓ Already correct</div>') if not any_change else ""
+
+    summary = (f'<div style="font-size:.72rem;color:#a1a1aa;margin-top:.8rem">'
+               f'{n_corrected} field{"s" if n_corrected!=1 else ""} corrected</div>'
+               if any_change else "")
+
+    st.markdown(
+        f'<div style="max-width:680px;margin:1.5rem auto 0">'
+        f'<div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:14px;'
+        f'padding:1.4rem 1.8rem;margin-bottom:1rem">'
+        f'<div style="font-size:.72rem;font-weight:700;letter-spacing:.08em;'
+        f'color:#6c47ff;text-transform:uppercase;margin-bottom:1.1rem">Corrected Address</div>'
+        f'{rows_html}'
+        f'{summary}'
+        f'</div>'
+        f'{clean_badge}'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Legend ─────────────────────────────────────────────────────────────────
+    if any_change:
         st.markdown(
-            '<div class="toast-ok" style="max-width:680px;margin:0 auto">'
-            '✓ &nbsp;Address looks good — no corrections needed.</div>',
-            unsafe_allow_html=True)
+            '<div style="max-width:680px;margin:.4rem auto 0" class="legend">'
+            '<span><span class="ldot" style="background:#f0fdf4;border:1px solid #86efac"></span>Corrected</span>'
+            '<span><span class="ldot" style="background:#fefce8;border:1px solid #fde047"></span>Original</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── Download buttons ───────────────────────────────────────────────────────
+    st.markdown(
+        '<div style="max-width:680px;margin:1rem auto 0">'
+        '<p style="font-size:.72rem;font-weight:700;letter-spacing:.7px;'
+        'text-transform:uppercase;color:#a1a1aa;margin-bottom:.6rem">Export</p>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    # Build a one-row DataFrame for export
+    export_df = pd.DataFrame([{
+        **{f"Original {k}": v for k, v in originals.items()},
+        **{f"Corrected {k}": v for k, v in corrected.items()},
+    }])
+    _dl1, _dl2, _dl3 = st.columns([2, 2, 5])
+    with _dl1:
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            export_df.to_excel(writer, index=False, sheet_name="Corrected Address")
+        buf.seek(0)
+        st.download_button("⬇  Excel (.xlsx)", buf,
+                           "corrected_address.xlsx",
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           use_container_width=True, type="primary")
+    with _dl2:
+        st.download_button("⬇  CSV (.csv)",
+                           export_df.to_csv(index=False).encode("utf-8-sig"),
+                           "corrected_address.csv", "text/csv",
+                           use_container_width=True)
 
 
 tab_single, tab_bulk = st.tabs(["  Single Address  ", "  Bulk (Paste / Upload)  "])
