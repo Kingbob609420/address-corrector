@@ -1617,10 +1617,10 @@ def validate_address_nominatim(addr1: str, city: str, state: str, country: str, 
                     "message":      f"Found on OpenStreetMap ({label})",
                     "strategy":     label,
                 }
-            last_error = f"Not found via "{label}""
+            last_error = f'Not found via "{label}"'
             time.sleep(0.3)   # Nominatim rate-limit: 1 req/sec
         except Exception as exc:
-            last_error = f"Error on "{label}": {str(exc)[:60]}"
+            last_error = f'Error on "{label}": {str(exc)[:60]}'
             time.sleep(0.3)
 
     return {"valid": False, "display_name": "", "lat": 0.0, "lon": 0.0,
