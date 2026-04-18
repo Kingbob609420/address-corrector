@@ -598,15 +598,19 @@ with tab_single:
 
         conf_html = changes_html = ""
         for label, orig, corr, conf, method in field_rows:
-            if not corr and not orig:
-                continue
-            display = corr or orig
+            # Always render every field — show "—" when empty so layout is complete
+            display      = corr or orig
+            is_empty     = not display
+            display_html = (f'<span style="color:#d4d4d8">—</span>' if is_empty
+                            else f'<span style="color:#111118">{display}</span>')
+            # Badge: show for any non-empty corrected value
+            badge_html = _badge(conf, method) if display else ""
             conf_html += (
                 f'<div style="display:flex;gap:.5rem;align-items:center;'
                 f'font-size:.82rem;margin-bottom:.35rem">'
                 f'<span style="color:#a1a1aa;min-width:72px">{label}</span>'
-                f'<span style="color:#111118;flex:1">{display}</span>'
-                f'{_badge(conf, method) if orig else ""}'
+                f'<span style="flex:1">{display_html}</span>'
+                f'{badge_html}'
                 f'</div>'
             )
             if orig and orig.upper() != corr.upper():
