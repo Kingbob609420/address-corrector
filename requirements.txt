@@ -3,3 +3,5 @@ openpyxl
 streamlit
 pycountry
 geonamescache
+openai
+requests

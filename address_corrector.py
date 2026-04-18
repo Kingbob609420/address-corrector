@@ -1364,6 +1364,240 @@ def process_file(input_path, output_path):
     return result
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# CONFIDENCE SCORING
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _address_line_confidence(val: str) -> tuple:
+    """Returns (corrected, confidence 0-1, method)."""
+    val_clean = _clean(val)
+    if not val_clean:
+        return "", 1.0, "empty"
+    corrected = correct_address_line(val_clean)
+    words = val_clean.split()
+    recognized = sum(
+        1 for w in words
+        if w.lower().rstrip(".,") in STREET_TYPES
+        or w.lower().rstrip(".,") in UNIT_TYPES
+        or w.lower().rstrip(".,") in DIRECTIONALS
+        or re.match(r"^\d+$", w)
+    )
+    ratio = recognized / len(words) if words else 1.0
+    return corrected, round(0.55 + ratio * 0.40, 2), "parsed"
+
+
+def _city_confidence(val: str) -> tuple:
+    from difflib import SequenceMatcher
+    import math
+    val_clean = _clean(val)
+    if not val_clean:
+        return "", 1.0, "empty"
+    lower = val_clean.lower()
+    if lower in _ALL_CITIES:
+        corrected = _ALL_CITIES[lower].upper()
+        return corrected, (0.95 if corrected.lower() != lower else 1.0), "exact"
+    if len(val_clean) >= 4:
+        candidates = get_close_matches(lower, _ALL_CITY_NAMES, n=5, cutoff=0.78)
+        if candidates:
+            def _sc(c):
+                sim = SequenceMatcher(None, lower, c).ratio()
+                return sim + math.log10(_CITY_POPULATION.get(c, 0) + 1) * 0.045
+            best = max(candidates, key=_sc)
+            ratio = SequenceMatcher(None, lower, best).ratio()
+            if ratio >= 0.78:
+                conf = round(0.70 + (ratio - 0.78) * 1.136, 2)
+                return _ALL_CITIES[best].upper(), min(conf, 0.90), "fuzzy"
+    return val_clean.upper(), 0.45, "fallback"
+
+
+def _state_confidence(val: str) -> tuple:
+    from difflib import SequenceMatcher
+    val_clean = _clean(val)
+    if not val_clean:
+        return "", 1.0, "empty"
+    lower = val_clean.lower()
+    for lut in (US_STATES, CA_PROVINCES, AU_STATES):
+        if lower in lut:
+            return lut[lower], 0.98, "exact"
+    if len(val_clean) <= 4 and val_clean.replace(" ", "").isalpha():
+        upper = val_clean.upper()
+        return upper, (0.90 if upper in ALL_REGION_CODES else 0.65), "code"
+    if len(val_clean) > 4:
+        hits = get_close_matches(lower, _ALL_STATE_NAMES, n=1, cutoff=0.78)
+        if hits:
+            ratio = SequenceMatcher(None, lower, hits[0]).ratio()
+            conf = round(0.65 + (ratio - 0.78) * 1.136, 2)
+            return _STATE_FUZZY_INDEX[hits[0]], min(conf, 0.85), "fuzzy"
+    return val_clean.upper(), 0.35, "fallback"
+
+
+def _country_confidence(val: str) -> tuple:
+    from difflib import SequenceMatcher
+    val_clean = _clean(val)
+    if not val_clean:
+        return "", 1.0, "empty"
+    lookup   = val_clean.lower().strip(" .")
+    no_dots  = lookup.replace(".", "")
+    stripped = no_dots.replace(" ", "")
+    if lookup in COUNTRY_MAP:
+        return COUNTRY_MAP[lookup].upper(), 0.99, "alias"
+    if no_dots in COUNTRY_MAP:
+        return COUNTRY_MAP[no_dots].upper(), 0.99, "alias"
+    if len(stripped) == 2 and stripped.isalpha():
+        c = pycountry.countries.get(alpha_2=stripped.upper())
+        if c:
+            return _pycountry_alpha2(c).upper(), 0.99, "iso2"
+    if len(stripped) == 3 and stripped.isalpha():
+        c = pycountry.countries.get(alpha_3=stripped.upper())
+        if c:
+            return _pycountry_alpha2(c).upper(), 0.97, "iso3"
+    for attr, query in [("name", val_clean.title()), ("common_name", val_clean.title()), ("official_name", val_clean.title())]:
+        c = pycountry.countries.get(**{attr: query})
+        if c:
+            return _pycountry_alpha2(c).upper(), 0.97, "name"
+    try:
+        results = pycountry.countries.search_fuzzy(val_clean)
+        if results:
+            return _pycountry_alpha2(results[0]).upper(), 0.82, "pycountry"
+    except LookupError:
+        pass
+    hits = get_close_matches(lookup, _ALL_COUNTRY_NAMES, n=1, cutoff=0.72)
+    if hits:
+        ratio = SequenceMatcher(None, lookup, hits[0]).ratio()
+        conf  = round(0.55 + (ratio - 0.72) * 0.893, 2)
+        return _pycountry_alpha2(_COUNTRY_NAME_INDEX[hits[0]]).upper(), min(conf, 0.78), "difflib"
+    return val_clean.upper(), 0.30, "fallback"
+
+
+def _postal_confidence(val: str) -> tuple:
+    val_clean = _clean(val)
+    if not val_clean:
+        return "", 1.0, "empty"
+    corrected = correct_postal_code(val_clean)
+    stripped  = val_clean.replace(" ", "").upper()
+    for pattern, _ in _POSTAL_PATTERNS:
+        if pattern.match(stripped) or pattern.match(val_clean.strip().upper()):
+            return corrected, 0.97, "known_format"
+    if stripped.isdigit():
+        return corrected, 0.82, "numeric"
+    return corrected, 0.60, "unknown_format"
+
+
+def score_single_address(addr1: str, addr2: str, city: str, state: str, country: str, postal: str) -> dict:
+    """
+    Returns per-field correction + confidence scores.
+    Each field value: {"original": str, "corrected": str, "confidence": float, "method": str, "changed": bool}
+    """
+    out = {}
+    for name, raw, fn in [
+        ("address",  addr1,   _address_line_confidence),
+        ("address2", addr2,   _address_line_confidence),
+        ("city",     city,    _city_confidence),
+        ("state",    state,   _state_confidence),
+        ("country",  country, _country_confidence),
+        ("postal",   postal,  _postal_confidence),
+    ]:
+        corrected, conf, method = fn(raw)
+        orig_clean = _clean(raw)
+        final = corrected if corrected else orig_clean
+        out[name] = {
+            "original":   orig_clean,
+            "corrected":  final,
+            "confidence": conf,
+            "method":     method,
+            "changed":    final.lower() != orig_clean.lower() and bool(orig_clean),
+        }
+    return out
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AI ENHANCEMENT  (OpenAI)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def ai_enhance_address(addr1: str, addr2: str, city: str, state: str, country: str, postal: str, api_key: str) -> dict:
+    """
+    Use OpenAI GPT-4o-mini to correct the address.
+    Returns {"address", "address2", "city", "state", "country", "postal", "note"}.
+    """
+    import json
+    import openai
+
+    client = openai.OpenAI(api_key=api_key)
+    prompt = (
+        "You are an address standardisation expert. Correct and standardise the address below.\n"
+        "Respond ONLY with a JSON object — no markdown, no explanation — with these exact keys:\n"
+        "  address, address2, city, state, country, postal_code, note\n"
+        "Rules:\n"
+        "- address / address2 / city: UPPERCASE, USPS-style abbreviations\n"
+        "- state: 2-letter abbreviation (or local equivalent)\n"
+        "- country: ISO 3166-1 alpha-2 code (e.g. US, GB, DE)\n"
+        "- postal_code: correctly formatted for the country\n"
+        "- note: ≤15-word plain-English summary of corrections (empty string if nothing changed)\n\n"
+        f"Street 1 : {addr1 or '(blank)'}\n"
+        f"Street 2 : {addr2 or '(blank)'}\n"
+        f"City     : {city or '(blank)'}\n"
+        f"State    : {state or '(blank)'}\n"
+        f"Country  : {country or '(blank)'}\n"
+        f"Post Code: {postal or '(blank)'}"
+    )
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=300,
+    )
+    text = resp.choices[0].message.content.strip()
+    text = re.sub(r"^```(?:json)?\n?", "", text)
+    text = re.sub(r"\n?```$", "", text)
+    data = json.loads(text)
+    return {
+        "address":  data.get("address",     addr1),
+        "address2": data.get("address2",    addr2),
+        "city":     data.get("city",        city),
+        "state":    data.get("state",       state),
+        "country":  data.get("country",     country),
+        "postal":   data.get("postal_code", postal),
+        "note":     data.get("note",        ""),
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ADDRESS VALIDATION  (OpenStreetMap Nominatim — no API key required)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def validate_address_nominatim(addr1: str, city: str, state: str, country: str, postal: str) -> dict:
+    """
+    Geocode via OpenStreetMap Nominatim.
+    Returns {"valid": bool, "display_name": str, "lat": float, "lon": float, "message": str}.
+    """
+    import requests
+
+    parts = [p for p in [addr1, city, state, postal, country] if p.strip()]
+    if not parts:
+        return {"valid": False, "display_name": "", "lat": 0.0, "lon": 0.0, "message": "No address to validate"}
+    try:
+        r = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": ", ".join(parts), "format": "json", "limit": 1, "addressdetails": 1},
+            headers={"User-Agent": "AddressCorrectorApp/1.0"},
+            timeout=6,
+        )
+        r.raise_for_status()
+        data = r.json()
+        if data:
+            best = data[0]
+            return {
+                "valid":        True,
+                "display_name": best.get("display_name", ""),
+                "lat":          float(best.get("lat", 0)),
+                "lon":          float(best.get("lon", 0)),
+                "message":      "Found on OpenStreetMap",
+            }
+        return {"valid": False, "display_name": "", "lat": 0.0, "lon": 0.0, "message": "Address not found in OSM database"}
+    except Exception as exc:
+        return {"valid": False, "display_name": "", "lat": 0.0, "lon": 0.0, "message": f"Validation error: {str(exc)[:80]}"}
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         print(__doc__)

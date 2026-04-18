@@ -8,6 +8,7 @@ import address_corrector as _ac
 importlib.reload(_ac)
 from address_corrector import (
     CORRECTORS, DISPLAY_LABELS, _detect_columns, _write_excel, apply_autofix,
+    score_single_address, ai_enhance_address, validate_address_nominatim,
 )
 
 
@@ -431,6 +432,26 @@ textarea::placeholder { color: #d4d4d8 !important; }
 """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR — settings
+# ══════════════════════════════════════════════════════════════════════════════
+import os as _os
+with st.sidebar:
+    st.markdown("### ⚙️ Settings")
+    _openai_key = st.text_input(
+        "OpenAI API Key",
+        value=_os.environ.get("OPENAI_API_KEY", ""),
+        type="password",
+        placeholder="sk-...",
+        help="Required for AI address enhancement (✨ AI Enhance button in Single Address tab)",
+    )
+    if _openai_key:
+        st.markdown('<p style="color:#15803d;font-size:.82rem;margin:0">✓ API key set — AI Enhancement enabled</p>', unsafe_allow_html=True)
+    else:
+        st.markdown('<p style="color:#a1a1aa;font-size:.82rem;margin:0">AI Enhancement disabled — enter key above</p>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.markdown('<p style="font-size:.75rem;color:#a1a1aa">Address validation uses free OpenStreetMap Nominatim — no key needed.</p>', unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
 # NAV
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("""
@@ -480,64 +501,94 @@ with tab_single:
     c1, c2 = st.columns(2)
     with c1:
         s_addr1   = st.text_input("Street Address",    placeholder="123 Main St",    key="s_addr1")
+        s_addr2   = st.text_input("Address Line 2",    placeholder="APT 4B",         key="s_addr2")
         s_city    = st.text_input("City",              placeholder="Fort Mill",       key="s_city")
-        s_state   = st.text_input("State / Province",  placeholder="NC",             key="s_state")
     with c2:
+        s_state   = st.text_input("State / Province",  placeholder="NC",             key="s_state")
         s_country = st.text_input("Country",           placeholder="United States",   key="s_country")
         s_zip     = st.text_input("ZIP / Postal Code", placeholder="29708",          key="s_zip")
 
-    if any(x.strip() for x in [s_addr1, s_city, s_state, s_country, s_zip]):
-        # Build one-row DataFrame and run the exact same correctors as bulk mode
+    if any(x.strip() for x in [s_addr1, s_addr2, s_city, s_state, s_country, s_zip]):
+        # Run confidence-scored corrections
+        scores = score_single_address(s_addr1, s_addr2, s_city, s_state, s_country, s_zip)
+
+        # Also apply autofix (updates country/state cross-field) via one-row DataFrame
         df_s = pd.DataFrame([{
-            "Address":     s_addr1,
-            "City":        s_city,
-            "State":       s_state,
-            "Country":     s_country,
-            "Postal Code": s_zip,
+            "Address":       s_addr1,
+            "Address 2":     s_addr2,
+            "City":          s_city,
+            "State":         s_state,
+            "Country":       s_country,
+            "Postal Code":   s_zip,
         }])
         col_map_s = _detect_columns(df_s.columns)
         result_s  = df_s.copy()
         for field, orig_col in col_map_s.items():
             if orig_col is None or field not in CORRECTORS: continue
-            lbl = f"Corrected {DISPLAY_LABELS[field]}"
-            result_s[lbl] = df_s[orig_col].apply(CORRECTORS[field])
+            result_s[f"Corrected {DISPLAY_LABELS[field]}"] = df_s[orig_col].apply(CORRECTORS[field])
         apply_autofix(result_s, col_map_s)
 
-        def _get_s(field):
-            lbl  = f"Corrected {DISPLAY_LABELS[field]}"
-            orig = col_map_s.get(field)
+        def _autofix_val(field_key, display_label, fallback):
+            lbl = f"Corrected {display_label}"
             if lbl in result_s.columns:
                 v = str(result_s[lbl].iloc[0]).strip()
-                return v if v else ""
-            if orig and orig in result_s.columns:
-                return str(result_s[orig].iloc[0]).strip()
-            return ""
+                if v and v.lower() not in {"nan", "none", ""}:
+                    return v
+            return fallback
 
-        # Fall back to original input if corrected value is empty
-        addr1_c   = _get_s("address_line_1") or s_addr1.strip()
-        city_c    = _get_s("city")    or s_city.strip()
-        state_c   = _get_s("state")   or s_state.strip()
-        zip_c     = _get_s("postal_code") or s_zip.strip()
-        country_c = _get_s("country") or s_country.strip()
+        # Merge: prefer autofix result for country/state (cross-field logic), else use scored correction
+        addr1_c   = scores["address"]["corrected"]  or s_addr1.strip()
+        addr2_c   = scores["address2"]["corrected"] or s_addr2.strip()
+        city_c    = scores["city"]["corrected"]     or s_city.strip()
+        state_c   = _autofix_val("state",   "State",       scores["state"]["corrected"]   or s_state.strip())
+        country_c = _autofix_val("country", "Country",     scores["country"]["corrected"] or s_country.strip())
+        zip_c     = scores["postal"]["corrected"]   or s_zip.strip()
 
-        # Build diff rows — include spelling corrections AND auto-filled fields
-        pairs = [
-            ("Address", s_addr1.strip(),   addr1_c),
-            ("City",    s_city.strip(),    city_c),
-            ("State",   s_state.strip(),   state_c),
-            ("ZIP",     s_zip.strip(),     zip_c),
-            ("Country", s_country.strip(), country_c),
+        # ── Confidence badge helper ───────────────────────────────────────────
+        def _badge(score):
+            pct = f"{score:.0%}"
+            if score >= 0.85:
+                return (f'<span style="background:#dcfce7;color:#15803d;border:1px solid #86efac;'
+                        f'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
+                        f'● {pct}</span>')
+            elif score >= 0.65:
+                return (f'<span style="background:#fefce8;color:#a16207;border:1px solid #fde068;'
+                        f'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
+                        f'● {pct}</span>')
+            else:
+                return (f'<span style="background:#fef2f2;color:#dc2626;border:1px solid #fecaca;'
+                        f'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
+                        f'● {pct}</span>')
+
+        # ── Build field rows ──────────────────────────────────────────────────
+        field_rows = [
+            ("Address",  s_addr1.strip(),   addr1_c,   scores["address"]["confidence"]),
+            ("Addr 2",   s_addr2.strip(),   addr2_c,   scores["address2"]["confidence"]),
+            ("City",     s_city.strip(),    city_c,    scores["city"]["confidence"]),
+            ("State",    s_state.strip(),   state_c,   scores["state"]["confidence"]),
+            ("ZIP",      s_zip.strip(),     zip_c,     scores["postal"]["confidence"]),
+            ("Country",  s_country.strip(), country_c, scores["country"]["confidence"]),
         ]
+
+        conf_html    = ""
         changes_html = ""
-        for label, orig, corr in pairs:
-            if not corr: continue
-            if orig.lower() == corr.lower(): continue   # no change
-            if orig:
-                # spelling / format correction
+        for label, orig, corr, conf in field_rows:
+            if not corr and not orig:
+                continue
+            display = corr or orig
+            conf_html += (
+                f'<div style="display:flex;gap:.5rem;align-items:center;'
+                f'font-size:.82rem;margin-bottom:.35rem">'
+                f'<span style="color:#a1a1aa;min-width:72px">{label}</span>'
+                f'<span style="color:#111118;flex:1">{display}</span>'
+                f'{_badge(conf) if orig else ""}'
+                f'</div>'
+            )
+            if orig and orig.lower() != corr.lower():
                 changes_html += (
                     f'<div style="display:flex;gap:.5rem;align-items:center;'
                     f'font-size:.82rem;margin-bottom:.4rem">'
-                    f'<span style="color:#a1a1aa;min-width:70px">{label}</span>'
+                    f'<span style="color:#a1a1aa;min-width:72px">{label}</span>'
                     f'<span style="color:#a16207;background:#fefce8;border:1px solid #fde068;'
                     f'border-radius:6px;padding:.15rem .5rem">{orig}</span>'
                     f'<span style="color:#a1a1aa">→</span>'
@@ -545,32 +596,27 @@ with tab_single:
                     f'border-radius:6px;padding:.15rem .5rem;font-weight:600">{corr}</span>'
                     f'</div>'
                 )
-            else:
-                # auto-detected from another field (e.g. state/country from ZIP)
+            elif not orig and corr:
                 changes_html += (
                     f'<div style="display:flex;gap:.5rem;align-items:center;'
                     f'font-size:.82rem;margin-bottom:.4rem">'
-                    f'<span style="color:#a1a1aa;min-width:70px">{label}</span>'
+                    f'<span style="color:#a1a1aa;min-width:72px">{label}</span>'
                     f'<span style="color:#15803d;background:#f0fdf4;border:1px solid #86efac;'
                     f'border-radius:6px;padding:.15rem .5rem;font-weight:600">'
                     f'✦ {corr} <span style="font-weight:400;opacity:.7">(auto-detected)</span>'
-                    f'</span>'
-                    f'</div>'
+                    f'</span></div>'
                 )
 
-        # Format as mailing label block
+        # ── Mailing label ─────────────────────────────────────────────────────
         line2 = ", ".join(p for p in [city_c, state_c, zip_c] if p)
-        addr_lines = [l for l in [addr1_c, line2, country_c] if l]
-        addr_block = "<br>".join(addr_lines)
+        addr_block = "<br>".join(p for p in [addr1_c, addr2_c, line2, country_c] if p)
 
         changes_section = ""
         if changes_html:
             changes_section = f"""
-            <div style="margin-top:1.2rem">
+            <div style="margin-top:1.2rem;padding-top:1.2rem;border-top:1px solid rgba(0,0,0,.06)">
               <div style="font-size:.68rem;font-weight:700;letter-spacing:.7px;
-                          text-transform:uppercase;color:#a1a1aa;margin-bottom:.6rem">
-                Changes made
-              </div>
+                          text-transform:uppercase;color:#a1a1aa;margin-bottom:.6rem">Changes made</div>
               {changes_html}
             </div>"""
 
@@ -578,16 +624,81 @@ with tab_single:
         <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:16px;
                     padding:1.8rem 2rem;margin-top:1.5rem;box-shadow:0 2px 16px rgba(0,0,0,.05)">
           <div style="font-size:.68rem;font-weight:700;letter-spacing:.7px;
-                      text-transform:uppercase;color:#a1a1aa;margin-bottom:.9rem">
-            Corrected address
-          </div>
+                      text-transform:uppercase;color:#a1a1aa;margin-bottom:.9rem">Corrected address</div>
           <div style="font-size:1.05rem;line-height:1.9;color:#111118;
-                      background:#f5f4f0;border-radius:10px;padding:1rem 1.2rem">
-            {addr_block}
+                      background:#f5f4f0;border-radius:10px;padding:1rem 1.2rem;margin-bottom:1.4rem">
+            {addr_block or "<em style='color:#a1a1aa'>—</em>"}
           </div>
+          <div style="font-size:.68rem;font-weight:700;letter-spacing:.7px;
+                      text-transform:uppercase;color:#a1a1aa;margin-bottom:.6rem">Confidence scores</div>
+          {conf_html}
           {changes_section}
         </div>
         """, unsafe_allow_html=True)
+
+        # ── Action buttons ────────────────────────────────────────────────────
+        st.markdown("<div style='height:.8rem'></div>", unsafe_allow_html=True)
+        btn1, btn2, _ = st.columns([2, 2, 5])
+        with btn1:
+            validate_clicked = st.button("🗺 Validate on Map", use_container_width=True, key="validate_btn")
+        with btn2:
+            _low_conf = any(
+                scores[f]["confidence"] < 0.65 and scores[f]["original"]
+                for f in ("address", "city", "state", "country", "postal")
+            )
+            ai_label = "✨ AI Enhance" + (" ⚠" if _low_conf else "")
+            ai_clicked = st.button(ai_label, use_container_width=True,
+                                   disabled=not bool(_openai_key), key="ai_btn")
+            if not _openai_key:
+                st.caption("Add OpenAI key in sidebar ↖")
+
+        if validate_clicked:
+            with st.spinner("Checking OpenStreetMap…"):
+                vr = validate_address_nominatim(addr1_c, city_c, state_c, country_c, zip_c)
+            if vr["valid"]:
+                maps_url = f"https://www.openstreetmap.org/?mlat={vr['lat']}&mlon={vr['lon']}&zoom=16"
+                st.markdown(f"""
+                <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;
+                            padding:.85rem 1.1rem;font-size:.84rem">
+                  <span style="color:#15803d;font-weight:700">✓ Address found</span>
+                  &nbsp;<a href="{maps_url}" target="_blank"
+                    style="color:#15803d;text-decoration:underline">View on map ↗</a><br>
+                  <span style="color:#71717a;font-size:.78rem">{vr['display_name']}</span>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;
+                            padding:.85rem 1.1rem;font-size:.84rem">
+                  <span style="color:#dc2626;font-weight:700">⚠ {vr['message']}</span>
+                </div>
+                """, unsafe_allow_html=True)
+
+        if ai_clicked and _openai_key:
+            with st.spinner("AI enhancing address…"):
+                try:
+                    ai = ai_enhance_address(s_addr1, s_addr2, s_city, s_state, s_country, s_zip, _openai_key)
+                    ai_l2 = ", ".join(p for p in [ai["city"], ai["state"], ai["postal"]] if p)
+                    ai_block = "<br>".join(p for p in [ai["address"], ai.get("address2",""), ai_l2, ai["country"]] if p)
+                    note_html = (f'<div style="color:#7c3aed;font-size:.8rem;margin-top:.7rem">✨ {ai["note"]}</div>'
+                                 if ai.get("note") else "")
+                    st.markdown(f"""
+                    <div style="background:#faf5ff;border:1px solid #e9d5ff;border-radius:12px;
+                                padding:1.4rem 1.8rem;margin-top:.5rem">
+                      <div style="font-size:.68rem;font-weight:700;letter-spacing:.7px;
+                                  text-transform:uppercase;color:#7c3aed;margin-bottom:.8rem">
+                        ✨ AI Enhanced Address
+                      </div>
+                      <div style="font-size:1.05rem;line-height:1.9;color:#111118;
+                                  background:#f5f4f0;border-radius:10px;padding:1rem 1.2rem">
+                        {ai_block}
+                      </div>
+                      {note_html}
+                    </div>
+                    """, unsafe_allow_html=True)
+                except Exception as exc:
+                    st.error(f"AI enhancement failed: {exc}")
+
     else:
         st.markdown("""
         <div style="text-align:center;color:#a1a1aa;font-size:.88rem;padding:3rem 0">
