@@ -513,23 +513,27 @@ with tab_single:
                 return str(result_s[orig].iloc[0]).strip()
             return ""
 
+        # Fall back to original input if corrected value is empty
         addr1_c   = _get_s("address_line_1") or s_addr1.strip()
-        city_c    = _get_s("city")
-        state_c   = _get_s("state")
-        zip_c     = _get_s("postal_code")
-        country_c = _get_s("country")
+        city_c    = _get_s("city")    or s_city.strip()
+        state_c   = _get_s("state")   or s_state.strip()
+        zip_c     = _get_s("postal_code") or s_zip.strip()
+        country_c = _get_s("country") or s_country.strip()
 
-        # Detect what changed to show the diff
+        # Build diff rows — include spelling corrections AND auto-filled fields
         pairs = [
-            ("Address", s_addr1.strip(),  addr1_c),
-            ("City",    s_city.strip(),   city_c),
-            ("State",   s_state.strip(),  state_c),
-            ("ZIP",     s_zip.strip(),    zip_c),
+            ("Address", s_addr1.strip(),   addr1_c),
+            ("City",    s_city.strip(),    city_c),
+            ("State",   s_state.strip(),   state_c),
+            ("ZIP",     s_zip.strip(),     zip_c),
             ("Country", s_country.strip(), country_c),
         ]
         changes_html = ""
         for label, orig, corr in pairs:
-            if orig and corr and orig.lower() != corr.lower():
+            if not corr: continue
+            if orig.lower() == corr.lower(): continue   # no change
+            if orig:
+                # spelling / format correction
                 changes_html += (
                     f'<div style="display:flex;gap:.5rem;align-items:center;'
                     f'font-size:.82rem;margin-bottom:.4rem">'
@@ -539,6 +543,18 @@ with tab_single:
                     f'<span style="color:#a1a1aa">→</span>'
                     f'<span style="color:#15803d;background:#f0fdf4;border:1px solid #86efac;'
                     f'border-radius:6px;padding:.15rem .5rem;font-weight:600">{corr}</span>'
+                    f'</div>'
+                )
+            else:
+                # auto-detected from another field (e.g. state/country from ZIP)
+                changes_html += (
+                    f'<div style="display:flex;gap:.5rem;align-items:center;'
+                    f'font-size:.82rem;margin-bottom:.4rem">'
+                    f'<span style="color:#a1a1aa;min-width:70px">{label}</span>'
+                    f'<span style="color:#15803d;background:#f0fdf4;border:1px solid #86efac;'
+                    f'border-radius:6px;padding:.15rem .5rem;font-weight:600">'
+                    f'✦ {corr} <span style="font-weight:400;opacity:.7">(auto-detected)</span>'
+                    f'</span>'
                     f'</div>'
                 )
 
