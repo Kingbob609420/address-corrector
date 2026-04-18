@@ -627,14 +627,12 @@ with tab_single:
                     'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700;'
                     'margin-left:.4rem">✨ AI</span>' if (ai_result and "error" not in ai_result) else "")
 
-        changes_section = ""
-        if changes_html:
-            changes_section = f"""
-            <div style="margin-top:1.2rem;padding-top:1.2rem;border-top:1px solid rgba(0,0,0,.06)">
-              <div style="font-size:.68rem;font-weight:700;letter-spacing:.7px;
-                          text-transform:uppercase;color:#a1a1aa;margin-bottom:.6rem">Changes made</div>
-              {changes_html}
-            </div>"""
+        changes_section = (
+            f'<div style="margin-top:1.2rem;padding-top:1.2rem;border-top:1px solid rgba(0,0,0,.06)">'
+            f'<div style="font-size:.68rem;font-weight:700;letter-spacing:.7px;text-transform:uppercase;'
+            f'color:#a1a1aa;margin-bottom:.6rem">Changes made</div>'
+            f'{changes_html}</div>'
+        ) if changes_html else ""
 
         if ai_result and "error" in ai_result:
             st.warning(f"AI correction failed: {ai_result['error']}")
