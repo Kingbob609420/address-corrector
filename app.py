@@ -498,31 +498,19 @@ with tab_single:
 
     if any(x.strip() for x in [s_addr1, s_addr2, s_city, s_state, s_country, s_zip]):
 
-        # ── 1. ZIP → State/Country (authoritative override) ───────────────────
-        zip_derived_state   = infer_us_state_from_zip(s_zip.strip())
-        zip_derived_country = "US" if zip_derived_state else ""
-
-        # ── 2. Rule-based corrections with confidence scores ──────────────────
+        # ── 1. Rule-based corrections with confidence scores ──────────────────
         scores = score_single_address(s_addr1, s_addr2, s_city, s_state, s_country, s_zip)
 
         addr1_c   = scores["address"]["corrected"]  or s_addr1.strip()
         addr2_c   = scores["address2"]["corrected"] or s_addr2.strip()
         city_c    = scores["city"]["corrected"]     or s_city.strip()
         zip_c     = scores["postal"]["corrected"]   or s_zip.strip()
+        state_c   = scores["state"]["corrected"]    or s_state.strip()
+        country_c = scores["country"]["corrected"]  or s_country.strip()
+        state_conf,   state_method   = scores["state"]["confidence"],   scores["state"]["method"]
+        country_conf, country_method = scores["country"]["confidence"], scores["country"]["method"]
 
-        # ZIP prefix beats everything else for state + country
-        if zip_derived_state:
-            state_c   = zip_derived_state
-            country_c = zip_derived_country
-            state_conf, state_method   = 1.0, "zip_derived"
-            country_conf, country_method = 1.0, "zip_derived"
-        else:
-            state_c   = scores["state"]["corrected"]   or s_state.strip()
-            country_c = scores["country"]["corrected"] or s_country.strip()
-            state_conf,   state_method   = scores["state"]["confidence"],   scores["state"]["method"]
-            country_conf, country_method = scores["country"]["confidence"], scores["country"]["method"]
-
-        # ── 3. Auto AI correction (cached per unique input set) ───────────────
+        # ── 2. Auto AI correction (cached per unique input set) ───────────────
         ai_result = None
         if _openai_key:
             if "_ai_cache" not in st.session_state:
@@ -538,7 +526,6 @@ with tab_single:
                         )
                     except Exception as _exc:
                         ai_result = {"error": str(_exc)}
-                # Keep cache bounded to last 30 unique inputs
                 if len(cache) >= 30:
                     for _k in list(cache.keys())[:10]:
                         del cache[_k]
@@ -546,15 +533,26 @@ with tab_single:
             else:
                 ai_result = cache[_hash]
 
-        # Merge AI results on top when available (AI beats rule-based, but ZIP still wins for state)
+        def _ai_val(v, fallback):
+            """Return AI value only if non-empty and not a placeholder string."""
+            clean = str(v or "").strip()
+            return clean if clean and clean.lower() not in {"(blank)", "blank", "none", "nan", ""} else fallback
+
         if ai_result and "error" not in ai_result:
-            addr1_c   = ai_result["address"]           or addr1_c
-            addr2_c   = ai_result.get("address2", "")  or addr2_c
-            city_c    = ai_result["city"]               or city_c
-            zip_c     = ai_result["postal"]             or zip_c
-            if not zip_derived_state:
-                state_c   = ai_result["state"]          or state_c
-                country_c = ai_result["country"]        or country_c
+            addr1_c   = _ai_val(ai_result.get("address"),  addr1_c)
+            addr2_c   = _ai_val(ai_result.get("address2"), addr2_c)
+            city_c    = _ai_val(ai_result.get("city"),     city_c)
+            zip_c     = _ai_val(ai_result.get("postal"),   zip_c)
+            state_c   = _ai_val(ai_result.get("state"),    state_c)
+            country_c = _ai_val(ai_result.get("country"),  country_c)
+
+        # ── 3. ZIP → State override — runs LAST, always wins ─────────────────
+        zip_derived_state = infer_us_state_from_zip(zip_c or s_zip.strip())
+        if zip_derived_state:
+            state_c   = zip_derived_state
+            country_c = "US"
+            state_conf,   state_method   = 1.0, "zip_derived"
+            country_conf, country_method = 1.0, "zip_derived"
 
         # ── 4. Confidence badge helper ────────────────────────────────────────
         def _badge(conf, method=""):
