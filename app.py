@@ -547,7 +547,8 @@ with tab_single:
             country_c = _ai_val(ai_result.get("country"),  country_c)
 
         # ── 3. ZIP → State override — runs LAST, always wins ─────────────────
-        zip_derived_state = infer_us_state_from_zip(zip_c or s_zip.strip())
+        # Use raw user input directly — never trust processed/AI-modified zip for this lookup
+        zip_derived_state = infer_us_state_from_zip(s_zip.strip()) or infer_us_state_from_zip(zip_c)
         if zip_derived_state:
             state_c   = zip_derived_state
             country_c = "US"
@@ -668,26 +669,24 @@ with tab_single:
             validate_clicked = st.button("🗺 Validate on Map", use_container_width=True, key="validate_btn")
 
         if validate_clicked:
-            with st.spinner("Checking OpenStreetMap…"):
+            with st.spinner("Searching OpenStreetMap (trying multiple strategies)…"):
                 vr = validate_address_nominatim(addr1_c, city_c, state_c, country_c, zip_c)
             if vr["valid"]:
                 maps_url = f"https://www.openstreetmap.org/?mlat={vr['lat']}&mlon={vr['lon']}&zoom=16"
-                st.markdown(f"""
-                <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;
-                            padding:.85rem 1.1rem;font-size:.84rem">
-                  <span style="color:#15803d;font-weight:700">✓ Address found</span>
-                  &nbsp;<a href="{maps_url}" target="_blank"
-                    style="color:#15803d;text-decoration:underline">View on map ↗</a><br>
-                  <span style="color:#71717a;font-size:.78rem">{vr['display_name']}</span>
-                </div>
-                """, unsafe_allow_html=True)
+                strategy_note = f' <span style="color:#71717a;font-size:.75rem">via {vr["strategy"]}</span>' if vr.get("strategy") else ""
+                st.markdown(
+                    f'<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:.85rem 1.1rem;font-size:.84rem">'
+                    f'<span style="color:#15803d;font-weight:700">✓ Address found</span>{strategy_note}'
+                    f'&nbsp;<a href="{maps_url}" target="_blank" style="color:#15803d;text-decoration:underline">View on map ↗</a><br>'
+                    f'<span style="color:#71717a;font-size:.78rem">{vr["display_name"]}</span></div>',
+                    unsafe_allow_html=True,
+                )
             else:
-                st.markdown(f"""
-                <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;
-                            padding:.85rem 1.1rem;font-size:.84rem">
-                  <span style="color:#dc2626;font-weight:700">⚠ {vr['message']}</span>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(
+                    f'<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:.85rem 1.1rem;font-size:.84rem">'
+                    f'<span style="color:#dc2626;font-weight:700">⚠ {vr["message"]}</span></div>',
+                    unsafe_allow_html=True,
+                )
 
     else:
         st.markdown("""

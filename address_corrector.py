@@ -1567,35 +1567,65 @@ def ai_enhance_address(addr1: str, addr2: str, city: str, state: str, country: s
 
 def validate_address_nominatim(addr1: str, city: str, state: str, country: str, postal: str) -> dict:
     """
-    Geocode via OpenStreetMap Nominatim.
-    Returns {"valid": bool, "display_name": str, "lat": float, "lon": float, "message": str}.
+    Geocode via OpenStreetMap Nominatim with progressive fallback queries.
+    Tries increasingly broad queries until one succeeds.
+    Returns {"valid", "display_name", "lat", "lon", "message", "strategy"}.
     """
     import requests
+    import time
 
-    parts = [p for p in [addr1, city, state, postal, country] if p.strip()]
-    if not parts:
-        return {"valid": False, "display_name": "", "lat": 0.0, "lon": 0.0, "message": "No address to validate"}
-    try:
-        r = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={"q": ", ".join(parts), "format": "json", "limit": 1, "addressdetails": 1},
-            headers={"User-Agent": "AddressCorrectorApp/1.0"},
-            timeout=6,
-        )
-        r.raise_for_status()
-        data = r.json()
-        if data:
-            best = data[0]
-            return {
-                "valid":        True,
-                "display_name": best.get("display_name", ""),
-                "lat":          float(best.get("lat", 0)),
-                "lon":          float(best.get("lon", 0)),
-                "message":      "Found on OpenStreetMap",
-            }
-        return {"valid": False, "display_name": "", "lat": 0.0, "lon": 0.0, "message": "Address not found in OSM database"}
-    except Exception as exc:
-        return {"valid": False, "display_name": "", "lat": 0.0, "lon": 0.0, "message": f"Validation error: {str(exc)[:80]}"}
+    def _p(*vals):
+        return [v for v in vals if v and v.strip()]
+
+    # Ordered from most specific to broadest — stop at first hit
+    strategies = [
+        ("Full address",            _p(addr1, city, state, postal, country)),
+        ("Street + ZIP + country",  _p(addr1, postal, country)),
+        ("Street + city + country", _p(addr1, city, country)),
+        ("City + state + ZIP",      _p(city, state, postal, country)),
+        ("City + state + country",  _p(city, state, country)),
+        ("ZIP + country",           _p(postal, country)),
+    ]
+
+    # Remove duplicate / empty strategies
+    seen = set()
+    unique_strategies = []
+    for label, parts in strategies:
+        key = tuple(parts)
+        if key and key not in seen:
+            seen.add(key)
+            unique_strategies.append((label, parts))
+
+    last_error = "No address components to search"
+    for label, parts in unique_strategies:
+        try:
+            r = requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": ", ".join(parts), "format": "json", "limit": 1, "addressdetails": 1},
+                headers={"User-Agent": "AddressCorrectorApp/1.0"},
+                timeout=6,
+            )
+            r.raise_for_status()
+            data = r.json()
+            if data:
+                best = data[0]
+                return {
+                    "valid":        True,
+                    "display_name": best.get("display_name", ""),
+                    "lat":          float(best.get("lat", 0)),
+                    "lon":          float(best.get("lon", 0)),
+                    "message":      f"Found on OpenStreetMap ({label})",
+                    "strategy":     label,
+                }
+            last_error = f"Not found via "{label}""
+            time.sleep(0.3)   # Nominatim rate-limit: 1 req/sec
+        except Exception as exc:
+            last_error = f"Error on "{label}": {str(exc)[:60]}"
+            time.sleep(0.3)
+
+    return {"valid": False, "display_name": "", "lat": 0.0, "lon": 0.0,
+            "message": f"Address not found after trying all fallback strategies. Last: {last_error}",
+            "strategy": None}
 
 
 if __name__ == "__main__":
