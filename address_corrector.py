@@ -571,14 +571,14 @@ def correct_city(val):
 
     lower = val.lower()
 
-    # 1. Exact match in known cities → use canonical casing
+    # 1. Exact match in known cities → use canonical spelling (Title Case)
     if lower in _ALL_CITIES:
-        return _ALL_CITIES[lower].upper()
+        return _ALL_CITIES[lower]
 
     # 2. Fuzzy match for misspellings — only for inputs ≥ 4 chars
     if len(val) >= 4:
         from difflib import SequenceMatcher
-        candidates = get_close_matches(lower, _ALL_CITY_NAMES, n=5, cutoff=0.78)
+        candidates = get_close_matches(lower, _ALL_CITY_NAMES, n=5, cutoff=0.82)
         if candidates:
             import math
             def _score(c):
@@ -587,11 +587,11 @@ def correct_city(val):
                 pop_bonus = math.log10(pop + 1) * 0.045
                 return sim + pop_bonus
             best = max(candidates, key=_score)
-            if SequenceMatcher(None, lower, best).ratio() >= 0.78:
-                return _ALL_CITIES[best].upper()
+            if SequenceMatcher(None, lower, best).ratio() >= 0.82:
+                return _ALL_CITIES[best]
 
-    # 3. Fallback — all caps
-    return val.upper()
+    # 3. Fallback — Title Case
+    return val.title()
 
 
 def correct_state(val, country_hint=""):
@@ -1394,20 +1394,20 @@ def _city_confidence(val: str) -> tuple:
         return "", 1.0, "empty"
     lower = val_clean.lower()
     if lower in _ALL_CITIES:
-        corrected = _ALL_CITIES[lower].upper()
+        corrected = _ALL_CITIES[lower]           # canonical Title Case spelling
         return corrected, (0.95 if corrected.lower() != lower else 1.0), "exact"
     if len(val_clean) >= 4:
-        candidates = get_close_matches(lower, _ALL_CITY_NAMES, n=5, cutoff=0.78)
+        candidates = get_close_matches(lower, _ALL_CITY_NAMES, n=5, cutoff=0.82)
         if candidates:
             def _sc(c):
                 sim = SequenceMatcher(None, lower, c).ratio()
                 return sim + math.log10(_CITY_POPULATION.get(c, 0) + 1) * 0.045
             best = max(candidates, key=_sc)
             ratio = SequenceMatcher(None, lower, best).ratio()
-            if ratio >= 0.78:
-                conf = round(0.70 + (ratio - 0.78) * 1.136, 2)
-                return _ALL_CITIES[best].upper(), min(conf, 0.90), "fuzzy"
-    return val_clean.upper(), 0.45, "fallback"
+            if ratio >= 0.82:
+                conf = round(0.72 + (ratio - 0.82) * 1.4, 2)
+                return _ALL_CITIES[best], min(conf, 0.92), "fuzzy"
+    return val_clean.title(), 0.45, "fallback"
 
 
 def _state_confidence(val: str) -> tuple:
@@ -1524,15 +1524,18 @@ def ai_enhance_address(addr1: str, addr2: str, city: str, state: str, country: s
 
     client = openai.OpenAI(api_key=api_key)
     prompt = (
-        "You are an address standardisation expert. Correct and standardise the address below.\n"
+        "You are an address spelling and standardisation expert. "
+        "Your primary job is to correct any misspellings so every field contains the exact, real name.\n"
         "Respond ONLY with a JSON object — no markdown, no explanation — with these exact keys:\n"
         "  address, address2, city, state, country, postal_code, note\n"
         "Rules:\n"
-        "- address / address2 / city: UPPERCASE, USPS-style abbreviations\n"
-        "- state: 2-letter abbreviation (or local equivalent)\n"
+        "- address / address2: UPPERCASE, USPS-style abbreviations (e.g. ST, AVE, BLVD, APT)\n"
+        "- city: correct real-world spelling, Title Case (e.g. 'Fort Mill', 'Los Angeles', 'New York City')\n"
+        "- state: 2-letter abbreviation (e.g. SC, CA, TX)\n"
         "- country: ISO 3166-1 alpha-2 code (e.g. US, GB, DE)\n"
         "- postal_code: correctly formatted for the country\n"
-        "- note: ≤15-word plain-English summary of corrections (empty string if nothing changed)\n\n"
+        "- note: ≤15-word plain-English summary of spelling/format corrections (empty string if nothing changed)\n"
+        "IMPORTANT: Do not invent or guess — if a city/street name looks correct, keep it exactly as-is.\n\n"
         f"Street 1 : {addr1 or '(blank)'}\n"
         f"Street 2 : {addr2 or '(blank)'}\n"
         f"City     : {city or '(blank)'}\n"
