@@ -433,24 +433,9 @@ textarea::placeholder { color: #d4d4d8 !important; }
 """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SIDEBAR — settings
+# API KEY — read from Streamlit secrets (set in app dashboard or secrets.toml)
 # ══════════════════════════════════════════════════════════════════════════════
-import os as _os
-with st.sidebar:
-    st.markdown("### ⚙️ Settings")
-    _openai_key = st.text_input(
-        "OpenAI API Key",
-        value=_os.environ.get("OPENAI_API_KEY", ""),
-        type="password",
-        placeholder="sk-...",
-        help="Required for AI address enhancement (✨ AI Enhance button in Single Address tab)",
-    )
-    if _openai_key:
-        st.markdown('<p style="color:#15803d;font-size:.82rem;margin:0">✓ API key set — AI Enhancement enabled</p>', unsafe_allow_html=True)
-    else:
-        st.markdown('<p style="color:#a1a1aa;font-size:.82rem;margin:0">AI Enhancement disabled — enter key above</p>', unsafe_allow_html=True)
-    st.markdown("---")
-    st.markdown('<p style="font-size:.75rem;color:#a1a1aa">Address validation uses free OpenStreetMap Nominatim — no key needed.</p>', unsafe_allow_html=True)
+_openai_key = st.secrets.get("OPENAI_API_KEY", "")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # NAV
