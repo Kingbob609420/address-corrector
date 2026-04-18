@@ -464,270 +464,376 @@ st.markdown("""
 st.markdown("""
 <div class="tool-wrap" id="load">
     <div class="tool-label">Step 1</div>
-    <div class="tool-heading">Load your addresses</div>
-    <div class="tool-sub">Correct a single address instantly, or process hundreds at once.</div>
+    <div class="tool-heading">Correct your addresses</div>
+    <div class="tool-sub">Fix a single address instantly, or process hundreds at once.</div>
 </div>
 """, unsafe_allow_html=True)
 
-df_raw = None
-
-col_paste, col_or, col_upload = st.columns([10, 1, 10])
-
-with col_paste:
-    st.markdown("""
-    <div class="panel">
-        <div class="panel-icon">📋</div>
-        <div class="panel-title">Paste from Excel</div>
-        <div class="panel-desc">
-            Copy a block of cells with the header row and paste below.<br>
-            Tab, comma &amp; semicolon delimiters auto-detected.
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    pasted = st.text_area(
-        "paste", height=200, label_visibility="collapsed",
-        placeholder=(
-            "Address Line 1\tCity\tState\tCountry\tPostal Code\n"
-            "123 main st\tnew york\tnew york\tUSA\t10001\n"
-            "10 Downing St\tlondon\t\tuk\tSW1A2AA"
-        ),
-    )
-    if pasted.strip():
-        sample = pasted.split("\n")[0]
-        tabs, commas, semis = sample.count("\t"), sample.count(","), sample.count(";")
-        delim = "\t" if tabs >= commas and tabs >= semis else (";" if semis > commas else ",")
-        try:
-            df_raw = pd.read_csv(io.StringIO(pasted), sep=delim, dtype=str, on_bad_lines="skip").fillna("")
-            st.markdown(f'<div class="toast-ok">✓ &nbsp;{len(df_raw):,} rows ready</div>', unsafe_allow_html=True)
-        except Exception as e:
-            st.error(str(e))
-
-with col_or:
-    st.markdown("""
-    <div class="or-col" style="height:340px">
-        <div class="or-line-seg"></div>
-        <div class="or-circle">OR</div>
-        <div class="or-line-seg"></div>
-    </div>
-    """, unsafe_allow_html=True)
-
-with col_upload:
-    st.markdown("""
-    <div class="panel">
-        <div class="panel-icon">📁</div>
-        <div class="panel-title">Upload a file</div>
-        <div class="panel-desc">
-            Drop in a CSV or Excel file.<br>
-            All column formats handled automatically.
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    uploaded = st.file_uploader("upload", type=["csv","xlsx","xls"], label_visibility="collapsed")
-    if uploaded:
-        try:
-            df_raw = (
-                pd.read_csv(uploaded, dtype=str) if uploaded.name.endswith(".csv")
-                else pd.read_excel(uploaded, dtype=str)
-            ).fillna("")
-            st.markdown(
-                f'<div class="toast-ok">✓ &nbsp;{uploaded.name} &nbsp;·&nbsp; {len(df_raw):,} rows</div>',
-                unsafe_allow_html=True,
-            )
-        except Exception as e:
-            st.error(str(e))
+tab_single, tab_bulk = st.tabs(["Single Address", "Bulk Upload"])
 
 # ══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — SINGLE ADDRESS
 # ══════════════════════════════════════════════════════════════════════════════
-# RESULTS
-# ══════════════════════════════════════════════════════════════════════════════
-if df_raw is None or len(df_raw) == 0:
-    # ── Empty state ────────────────────────────────────────────────────────
-    st.markdown("""
-    <div style="max-width:1060px;margin:2rem auto 6rem;padding:0 2rem">
-    <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:18px;
-                text-align:center;padding:4.5rem 2rem;box-shadow:0 2px 16px rgba(0,0,0,.05)">
-        <div style="font-size:2.8rem;margin-bottom:1rem">📍</div>
-        <div style="font-size:1.15rem;font-weight:800;color:#111118;
-                    letter-spacing:-.5px;margin-bottom:.5rem">
-            Results will appear here
+with tab_single:
+    st.markdown('<div style="max-width:700px;margin:0 auto;padding:1.5rem 2rem 4rem">', unsafe_allow_html=True)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        s_addr1   = st.text_input("Street Address",    placeholder="123 Main St",    key="s_addr1")
+        s_city    = st.text_input("City",              placeholder="Fort Mill",       key="s_city")
+        s_state   = st.text_input("State / Province",  placeholder="NC",             key="s_state")
+    with c2:
+        s_country = st.text_input("Country",           placeholder="United States",   key="s_country")
+        s_zip     = st.text_input("ZIP / Postal Code", placeholder="29708",          key="s_zip")
+
+    if any(x.strip() for x in [s_addr1, s_city, s_state, s_country, s_zip]):
+        # Build one-row DataFrame and run the exact same correctors as bulk mode
+        df_s = pd.DataFrame([{
+            "Address":     s_addr1,
+            "City":        s_city,
+            "State":       s_state,
+            "Country":     s_country,
+            "Postal Code": s_zip,
+        }])
+        col_map_s = _detect_columns(df_s.columns)
+        result_s  = df_s.copy()
+        for field, orig_col in col_map_s.items():
+            if orig_col is None or field not in CORRECTORS: continue
+            lbl = f"Corrected {DISPLAY_LABELS[field]}"
+            result_s[lbl] = df_s[orig_col].apply(CORRECTORS[field])
+        apply_autofix(result_s, col_map_s)
+
+        def _get_s(field):
+            lbl  = f"Corrected {DISPLAY_LABELS[field]}"
+            orig = col_map_s.get(field)
+            if lbl in result_s.columns:
+                v = str(result_s[lbl].iloc[0]).strip()
+                return v if v else ""
+            if orig and orig in result_s.columns:
+                return str(result_s[orig].iloc[0]).strip()
+            return ""
+
+        addr1_c   = _get_s("address_line_1") or s_addr1.strip()
+        city_c    = _get_s("city")
+        state_c   = _get_s("state")
+        zip_c     = _get_s("postal_code")
+        country_c = _get_s("country")
+
+        # Detect what changed to show the diff
+        pairs = [
+            ("Address", s_addr1.strip(),  addr1_c),
+            ("City",    s_city.strip(),   city_c),
+            ("State",   s_state.strip(),  state_c),
+            ("ZIP",     s_zip.strip(),    zip_c),
+            ("Country", s_country.strip(), country_c),
+        ]
+        changes_html = ""
+        for label, orig, corr in pairs:
+            if orig and corr and orig.lower() != corr.lower():
+                changes_html += (
+                    f'<div style="display:flex;gap:.5rem;align-items:center;'
+                    f'font-size:.82rem;margin-bottom:.4rem">'
+                    f'<span style="color:#a1a1aa;min-width:70px">{label}</span>'
+                    f'<span style="color:#a16207;background:#fefce8;border:1px solid #fde068;'
+                    f'border-radius:6px;padding:.15rem .5rem">{orig}</span>'
+                    f'<span style="color:#a1a1aa">→</span>'
+                    f'<span style="color:#15803d;background:#f0fdf4;border:1px solid #86efac;'
+                    f'border-radius:6px;padding:.15rem .5rem;font-weight:600">{corr}</span>'
+                    f'</div>'
+                )
+
+        # Format as mailing label block
+        line2 = ", ".join(p for p in [city_c, state_c, zip_c] if p)
+        addr_lines = [l for l in [addr1_c, line2, country_c] if l]
+        addr_block = "<br>".join(addr_lines)
+
+        changes_section = ""
+        if changes_html:
+            changes_section = f"""
+            <div style="margin-top:1.2rem">
+              <div style="font-size:.68rem;font-weight:700;letter-spacing:.7px;
+                          text-transform:uppercase;color:#a1a1aa;margin-bottom:.6rem">
+                Changes made
+              </div>
+              {changes_html}
+            </div>"""
+
+        st.markdown(f"""
+        <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:16px;
+                    padding:1.8rem 2rem;margin-top:1.5rem;box-shadow:0 2px 16px rgba(0,0,0,.05)">
+          <div style="font-size:.68rem;font-weight:700;letter-spacing:.7px;
+                      text-transform:uppercase;color:#a1a1aa;margin-bottom:.9rem">
+            Corrected address
+          </div>
+          <div style="font-size:1.05rem;line-height:1.9;color:#111118;
+                      background:#f5f4f0;border-radius:10px;padding:1rem 1.2rem">
+            {addr_block}
+          </div>
+          {changes_section}
         </div>
-        <p style="color:#a1a1aa;font-size:.85rem;max-width:380px;
-                  margin:0 auto 2rem;line-height:1.75">
-            Paste your addresses or upload a file above to see corrections,
-            metrics, and download your cleaned data.
-        </p>
-        <div style="display:flex;justify-content:center;gap:.55rem;flex-wrap:wrap">
-            <span style="background:#f5f4f0;border:1px solid rgba(0,0,0,.07);border-radius:100px;
-                         padding:.35rem 1rem;font-size:.74rem;color:#6c47ff;font-weight:600">
-                ✓ Auto-detects column names
-            </span>
-            <span style="background:#f5f4f0;border:1px solid rgba(0,0,0,.07);border-radius:100px;
-                         padding:.35rem 1rem;font-size:.74rem;color:#6c47ff;font-weight:600">
-                ✓ 249 countries
-            </span>
-            <span style="background:#f5f4f0;border:1px solid rgba(0,0,0,.07);border-radius:100px;
-                         padding:.35rem 1rem;font-size:.74rem;color:#6c47ff;font-weight:600">
-                ✓ Catches misspellings
-            </span>
-            <span style="background:#f5f4f0;border:1px solid rgba(0,0,0,.07);border-radius:100px;
-                         padding:.35rem 1rem;font-size:.74rem;color:#6c47ff;font-weight:600">
-                ✓ Excel &amp; CSV export
-            </span>
-        </div>
-    </div>
-    </div>
-    """, unsafe_allow_html=True)
-    st.stop()
-
-
-col_map  = _detect_columns(df_raw.columns)
-detected = {f: c for f, c in col_map.items() if c is not None}
-
-if not detected:
-    st.markdown("""
-    <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:12px;
-                padding:1.1rem 1.4rem;margin-top:1.5rem">
-        <b style="color:#dc2626">⚠ No address columns detected</b><br>
-        <span style="color:#a1a1aa;font-size:.82rem">
-        Ensure your data has a header row with names like Address, City, State, Country, Postal Code.
-        </span>
-    </div>""", unsafe_allow_html=True)
-    st.stop()
-
-# Corrections
-result = df_raw.copy()
-corrected_col_map = {}
-for field, orig_col in col_map.items():
-    if orig_col is None: continue
-    if field not in CORRECTORS: continue   # hint-only fields (e.g. company_name)
-    lbl = f"Corrected {DISPLAY_LABELS[field]}"
-    result[lbl] = df_raw[orig_col].apply(CORRECTORS[field])
-    corrected_col_map[lbl] = lbl
-
-# Auto-fix country & state from postal code + company name hints
-apply_autofix(result, col_map)
-
-# Stats
-per_field, total_changed = {}, 0
-for field, orig_col in col_map.items():
-    if orig_col is None: continue
-    if field not in DISPLAY_LABELS: continue   # hint-only fields
-    lbl = f"Corrected {DISPLAY_LABELS[field]}"
-    if lbl not in result.columns: continue
-    n = (result[orig_col].astype(str).str.strip() != result[lbl].astype(str).str.strip()).sum()
-    per_field[DISPLAY_LABELS[field]] = int(n)
-    total_changed += n
-total_rows, fields_found = len(df_raw), len(detected)
-
-# ── Step 2 heading ─────────────────────────────────────────────────────
-st.markdown("""
-<div class="tool-wrap" style="padding-bottom:1.4rem">
-    <div class="tool-label">Step 2</div>
-    <div class="tool-heading">Your corrected addresses</div>
-    <div class="tool-sub">Review what changed, then download.</div>
-</div>
-""", unsafe_allow_html=True)
-
-# Wrap the whole results block in tool-wrap padding
-st.markdown('<div style="max-width:1060px;margin:0 auto;padding:0 2rem 6rem">', unsafe_allow_html=True)
-st.markdown('<div class="results-card">', unsafe_allow_html=True)
-
-# Metrics
-mc = st.columns(4)
-for col, (val, lbl) in zip(mc, [
-    (f"{total_rows:,}", "Rows Processed"),
-    (f"{fields_found}", "Fields Detected"),
-    (f"{total_changed:,}", "Cells Corrected"),
-    (f"{total_changed/max(total_rows*fields_found,1):.0%}", "Correction Rate"),
-]):
-    col.markdown(f'<div class="mtile"><div class="mtile-val">{val}</div><div class="mtile-lbl">{lbl}</div></div>',
-                 unsafe_allow_html=True)
-
-st.markdown("<div style='height:.8rem'></div>", unsafe_allow_html=True)
-
-# Column badges
-bdg = '<div class="badge-row">'
-for field, label in DISPLAY_LABELS.items():
-    orig = col_map.get(field)
-    if orig:
-        bdg += f'<span class="bdg bdg-ok">✓ {label} <span class="bdg-src">← {orig}</span></span>'
+        """, unsafe_allow_html=True)
     else:
-        bdg += f'<span class="bdg bdg-no">— {label}</span>'
-bdg += '</div>'
-st.markdown(bdg, unsafe_allow_html=True)
+        st.markdown("""
+        <div style="text-align:center;color:#a1a1aa;font-size:.88rem;padding:3rem 0">
+            Enter an address above to see corrections instantly.
+        </div>
+        """, unsafe_allow_html=True)
 
-# Bar chart
-if any(v > 0 for v in per_field.values()):
-    with st.expander("Breakdown by field"):
-        st.bar_chart(pd.DataFrame.from_dict(per_field, orient="index", columns=["Corrections"]),
-                     color="#6c47ff")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-# View toggle + table
-vl, vr = st.columns([4, 3])
-with vl:
-    st.markdown('<p style="font-size:.72rem;font-weight:700;letter-spacing:.7px;'
-                'text-transform:uppercase;color:#a1a1aa;margin-bottom:.3rem">View</p>',
-                unsafe_allow_html=True)
-with vr:
-    view_mode = st.radio("v", ["Side by side", "Corrected only", "Changes only"],
-                         horizontal=True, label_visibility="collapsed")
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — BULK
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_bulk:
+    df_raw = None
 
-orig_addr = [c for c in df_raw.columns if c in col_map.values()]
-corr_cols = list(corrected_col_map.keys())
-other     = [c for c in df_raw.columns if c not in orig_addr]
+    col_paste, col_or, col_upload = st.columns([10, 1, 10])
 
-if view_mode == "Corrected only":
-    display_df = pd.concat([df_raw[other], result[corr_cols]], axis=1)
-elif view_mode == "Changes only":
-    mask = pd.Series(False, index=result.index)
-    for field, orig_col in col_map.items():
-        if orig_col is None or field not in DISPLAY_LABELS: continue
-        lbl = f"Corrected {DISPLAY_LABELS[field]}"
-        if lbl not in result.columns: continue
-        mask |= result[orig_col].astype(str).str.strip() != result[lbl].astype(str).str.strip()
-    display_df = result[mask]
-else:
-    display_df = result
+    with col_paste:
+        st.markdown("""
+        <div class="panel">
+            <div class="panel-icon">📋</div>
+            <div class="panel-title">Paste from Excel</div>
+            <div class="panel-desc">
+                Copy a block of cells with the header row and paste below.<br>
+                Tab, comma &amp; semicolon delimiters auto-detected.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        pasted = st.text_area(
+            "paste", height=200, label_visibility="collapsed",
+            placeholder=(
+                "Address Line 1\tCity\tState\tCountry\tPostal Code\n"
+                "123 main st\tnew york\tnew york\tUSA\t10001\n"
+                "10 Downing St\tlondon\t\tuk\tSW1A2AA"
+            ),
+        )
+        if pasted.strip():
+            sample = pasted.split("\n")[0]
+            tabs, commas, semis = sample.count("\t"), sample.count(","), sample.count(";")
+            delim = "\t" if tabs >= commas and tabs >= semis else (";" if semis > commas else ",")
+            try:
+                df_raw = pd.read_csv(io.StringIO(pasted), sep=delim, dtype=str, on_bad_lines="skip").fillna("")
+                st.markdown(f'<div class="toast-ok">✓ &nbsp;{len(df_raw):,} rows ready</div>', unsafe_allow_html=True)
+            except Exception as e:
+                st.error(str(e))
 
-def highlight_changes(df):
-    s = pd.DataFrame("", index=df.index, columns=df.columns)
-    for field, orig_col in col_map.items():
-        if field not in DISPLAY_LABELS: continue
-        lbl = f"Corrected {DISPLAY_LABELS[field]}"
-        if orig_col not in df.columns or lbl not in df.columns: continue
-        changed = df[orig_col].astype(str).str.strip() != df[lbl].astype(str).str.strip()
-        s.loc[changed, lbl]      = "background-color:#f0fdf4;color:#15803d;font-weight:600"
-        s.loc[changed, orig_col] = "background-color:#fefce8;color:#a16207"
-    return s
+    with col_or:
+        st.markdown("""
+        <div class="or-col" style="height:340px">
+            <div class="or-line-seg"></div>
+            <div class="or-circle">OR</div>
+            <div class="or-line-seg"></div>
+        </div>
+        """, unsafe_allow_html=True)
 
-st.dataframe(display_df.style.apply(highlight_changes, axis=None),
-         use_container_width=True, height=min(44 + 36*len(display_df), 520))
+    with col_upload:
+        st.markdown("""
+        <div class="panel">
+            <div class="panel-icon">📁</div>
+            <div class="panel-title">Upload a file</div>
+            <div class="panel-desc">
+                Drop in a CSV or Excel file.<br>
+                All column formats handled automatically.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        uploaded = st.file_uploader("upload", type=["csv","xlsx","xls"], label_visibility="collapsed")
+        if uploaded:
+            try:
+                df_raw = (
+                    pd.read_csv(uploaded, dtype=str) if uploaded.name.endswith(".csv")
+                    else pd.read_excel(uploaded, dtype=str)
+                ).fillna("")
+                st.markdown(
+                    f'<div class="toast-ok">✓ &nbsp;{uploaded.name} &nbsp;·&nbsp; {len(df_raw):,} rows</div>',
+                    unsafe_allow_html=True,
+                )
+            except Exception as e:
+                st.error(str(e))
 
-st.markdown(f"""
-<div class="legend">
-<span><span class="ldot" style="background:#dcfce7;border:1px solid #86efac"></span>Corrected value</span>
-<span><span class="ldot" style="background:#fef9c3;border:1px solid #fde047"></span>Original (changed)</span>
-<span style="margin-left:auto">{len(display_df):,} of {total_rows:,} rows shown</span>
-</div>
-<div style="height:1.5rem"></div>
-""", unsafe_allow_html=True)
+    # ── RESULTS ────────────────────────────────────────────────────────────
+    if df_raw is None or len(df_raw) == 0:
+        st.markdown("""
+        <div style="max-width:1060px;margin:2rem auto 6rem;padding:0 2rem">
+        <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:18px;
+                    text-align:center;padding:4.5rem 2rem;box-shadow:0 2px 16px rgba(0,0,0,.05)">
+            <div style="font-size:2.8rem;margin-bottom:1rem">📍</div>
+            <div style="font-size:1.15rem;font-weight:800;color:#111118;
+                        letter-spacing:-.5px;margin-bottom:.5rem">
+                Results will appear here
+            </div>
+            <p style="color:#a1a1aa;font-size:.85rem;max-width:380px;
+                      margin:0 auto 2rem;line-height:1.75">
+                Paste your addresses or upload a file above to see corrections,
+                metrics, and download your cleaned data.
+            </p>
+            <div style="display:flex;justify-content:center;gap:.55rem;flex-wrap:wrap">
+                <span style="background:#f5f4f0;border:1px solid rgba(0,0,0,.07);border-radius:100px;
+                             padding:.35rem 1rem;font-size:.74rem;color:#6c47ff;font-weight:600">
+                    ✓ Auto-detects column names
+                </span>
+                <span style="background:#f5f4f0;border:1px solid rgba(0,0,0,.07);border-radius:100px;
+                             padding:.35rem 1rem;font-size:.74rem;color:#6c47ff;font-weight:600">
+                    ✓ 249 countries
+                </span>
+                <span style="background:#f5f4f0;border:1px solid rgba(0,0,0,.07);border-radius:100px;
+                             padding:.35rem 1rem;font-size:.74rem;color:#6c47ff;font-weight:600">
+                    ✓ Catches misspellings
+                </span>
+                <span style="background:#f5f4f0;border:1px solid rgba(0,0,0,.07);border-radius:100px;
+                             padding:.35rem 1rem;font-size:.74rem;color:#6c47ff;font-weight:600">
+                    ✓ Excel &amp; CSV export
+                </span>
+            </div>
+        </div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        col_map  = _detect_columns(df_raw.columns)
+        detected = {f: c for f, c in col_map.items() if c is not None}
 
-# Download
-st.markdown("""
-<p style="font-size:.72rem;font-weight:700;letter-spacing:.7px;text-transform:uppercase;
-      color:#a1a1aa;margin-bottom:.7rem">Export</p>
-""", unsafe_allow_html=True)
-d1, d2, _ = st.columns([2, 2, 5])
-with d1:
-    buf = io.BytesIO()
-    _write_excel(result, list(df_raw.columns), corrected_col_map, buf, col_map)
-    buf.seek(0)
-    st.download_button("⬇  Excel (.xlsx)", buf, "corrected_addresses.xlsx",
-                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       use_container_width=True, type="primary")
-with d2:
-    st.download_button("⬇  CSV (.csv)", result.to_csv(index=False).encode("utf-8-sig"),
-                       "corrected_addresses.csv", "text/csv", use_container_width=True)
+        if not detected:
+            st.markdown("""
+            <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:12px;
+                        padding:1.1rem 1.4rem;margin-top:1.5rem">
+                <b style="color:#dc2626">⚠ No address columns detected</b><br>
+                <span style="color:#a1a1aa;font-size:.82rem">
+                Ensure your data has a header row with names like Address, City, State, Country, Postal Code.
+                </span>
+            </div>""", unsafe_allow_html=True)
+        else:
+            # Corrections
+            result = df_raw.copy()
+            corrected_col_map = {}
+            for field, orig_col in col_map.items():
+                if orig_col is None: continue
+                if field not in CORRECTORS: continue
+                lbl = f"Corrected {DISPLAY_LABELS[field]}"
+                result[lbl] = df_raw[orig_col].apply(CORRECTORS[field])
+                corrected_col_map[lbl] = lbl
 
-st.markdown("</div></div>", unsafe_allow_html=True)
+            apply_autofix(result, col_map)
+
+            # Stats
+            per_field, total_changed = {}, 0
+            for field, orig_col in col_map.items():
+                if orig_col is None: continue
+                if field not in DISPLAY_LABELS: continue
+                lbl = f"Corrected {DISPLAY_LABELS[field]}"
+                if lbl not in result.columns: continue
+                n = (result[orig_col].astype(str).str.strip() != result[lbl].astype(str).str.strip()).sum()
+                per_field[DISPLAY_LABELS[field]] = int(n)
+                total_changed += n
+            total_rows, fields_found = len(df_raw), len(detected)
+
+            st.markdown("""
+            <div class="tool-wrap" style="padding-bottom:1.4rem">
+                <div class="tool-label">Step 2</div>
+                <div class="tool-heading">Your corrected addresses</div>
+                <div class="tool-sub">Review what changed, then download.</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown('<div style="max-width:1060px;margin:0 auto;padding:0 2rem 6rem">', unsafe_allow_html=True)
+            st.markdown('<div class="results-card">', unsafe_allow_html=True)
+
+            # Metrics
+            mc = st.columns(4)
+            for col, (val, lbl) in zip(mc, [
+                (f"{total_rows:,}", "Rows Processed"),
+                (f"{fields_found}", "Fields Detected"),
+                (f"{total_changed:,}", "Cells Corrected"),
+                (f"{total_changed/max(total_rows*fields_found,1):.0%}", "Correction Rate"),
+            ]):
+                col.markdown(f'<div class="mtile"><div class="mtile-val">{val}</div><div class="mtile-lbl">{lbl}</div></div>',
+                             unsafe_allow_html=True)
+
+            st.markdown("<div style='height:.8rem'></div>", unsafe_allow_html=True)
+
+            # Column badges
+            bdg = '<div class="badge-row">'
+            for field, label in DISPLAY_LABELS.items():
+                orig = col_map.get(field)
+                if orig:
+                    bdg += f'<span class="bdg bdg-ok">✓ {label} <span class="bdg-src">← {orig}</span></span>'
+                else:
+                    bdg += f'<span class="bdg bdg-no">— {label}</span>'
+            bdg += '</div>'
+            st.markdown(bdg, unsafe_allow_html=True)
+
+            # Bar chart
+            if any(v > 0 for v in per_field.values()):
+                with st.expander("Breakdown by field"):
+                    st.bar_chart(pd.DataFrame.from_dict(per_field, orient="index", columns=["Corrections"]),
+                                 color="#6c47ff")
+
+            # View toggle + table
+            vl, vr = st.columns([4, 3])
+            with vl:
+                st.markdown('<p style="font-size:.72rem;font-weight:700;letter-spacing:.7px;'
+                            'text-transform:uppercase;color:#a1a1aa;margin-bottom:.3rem">View</p>',
+                            unsafe_allow_html=True)
+            with vr:
+                view_mode = st.radio("v", ["Side by side", "Corrected only", "Changes only"],
+                                     horizontal=True, label_visibility="collapsed")
+
+            orig_addr = [c for c in df_raw.columns if c in col_map.values()]
+            corr_cols = list(corrected_col_map.keys())
+            other     = [c for c in df_raw.columns if c not in orig_addr]
+
+            if view_mode == "Corrected only":
+                display_df = pd.concat([df_raw[other], result[corr_cols]], axis=1)
+            elif view_mode == "Changes only":
+                mask = pd.Series(False, index=result.index)
+                for field, orig_col in col_map.items():
+                    if orig_col is None or field not in DISPLAY_LABELS: continue
+                    lbl = f"Corrected {DISPLAY_LABELS[field]}"
+                    if lbl not in result.columns: continue
+                    mask |= result[orig_col].astype(str).str.strip() != result[lbl].astype(str).str.strip()
+                display_df = result[mask]
+            else:
+                display_df = result
+
+            def highlight_changes(df):
+                s = pd.DataFrame("", index=df.index, columns=df.columns)
+                for field, orig_col in col_map.items():
+                    if field not in DISPLAY_LABELS: continue
+                    lbl = f"Corrected {DISPLAY_LABELS[field]}"
+                    if orig_col not in df.columns or lbl not in df.columns: continue
+                    changed = df[orig_col].astype(str).str.strip() != df[lbl].astype(str).str.strip()
+                    s.loc[changed, lbl]      = "background-color:#f0fdf4;color:#15803d;font-weight:600"
+                    s.loc[changed, orig_col] = "background-color:#fefce8;color:#a16207"
+                return s
+
+            st.dataframe(display_df.style.apply(highlight_changes, axis=None),
+                     use_container_width=True, height=min(44 + 36*len(display_df), 520))
+
+            st.markdown(f"""
+            <div class="legend">
+            <span><span class="ldot" style="background:#dcfce7;border:1px solid #86efac"></span>Corrected value</span>
+            <span><span class="ldot" style="background:#fef9c3;border:1px solid #fde047"></span>Original (changed)</span>
+            <span style="margin-left:auto">{len(display_df):,} of {total_rows:,} rows shown</span>
+            </div>
+            <div style="height:1.5rem"></div>
+            """, unsafe_allow_html=True)
+
+            # Download
+            st.markdown("""
+            <p style="font-size:.72rem;font-weight:700;letter-spacing:.7px;text-transform:uppercase;
+                  color:#a1a1aa;margin-bottom:.7rem">Export</p>
+            """, unsafe_allow_html=True)
+            d1, d2, _ = st.columns([2, 2, 5])
+            with d1:
+                buf = io.BytesIO()
+                _write_excel(result, list(df_raw.columns), corrected_col_map, buf, col_map)
+                buf.seek(0)
+                st.download_button("⬇  Excel (.xlsx)", buf, "corrected_addresses.xlsx",
+                                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   use_container_width=True, type="primary")
+            with d2:
+                st.download_button("⬇  CSV (.csv)", result.to_csv(index=False).encode("utf-8-sig"),
+                                   "corrected_addresses.csv", "text/csv", use_container_width=True)
+
+            st.markdown("</div></div>", unsafe_allow_html=True)
 
