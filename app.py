@@ -9,6 +9,7 @@ importlib.reload(_ac)
 from address_corrector import (
     CORRECTORS, DISPLAY_LABELS, _detect_columns, _write_excel, apply_autofix,
     score_single_address, ai_enhance_address, validate_address_nominatim,
+    infer_us_state_from_zip,
 )
 
 
@@ -496,83 +497,111 @@ tab_single, tab_bulk = st.tabs(["Single Address", "Bulk Upload"])
 # TAB 1 — SINGLE ADDRESS
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_single:
+    import hashlib as _hashlib
+
     st.markdown('<div style="max-width:700px;margin:0 auto;padding:1.5rem 2rem 4rem">', unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)
     with c1:
-        s_addr1   = st.text_input("Street Address",    placeholder="123 Main St",    key="s_addr1")
-        s_addr2   = st.text_input("Address Line 2",    placeholder="APT 4B",         key="s_addr2")
-        s_city    = st.text_input("City",              placeholder="Fort Mill",       key="s_city")
+        s_addr1   = st.text_input("Street Address",    placeholder="123 Main St",  key="s_addr1")
+        s_addr2   = st.text_input("Address Line 2",    placeholder="APT 4B",       key="s_addr2")
+        s_city    = st.text_input("City",              placeholder="Fort Mill",     key="s_city")
     with c2:
-        s_state   = st.text_input("State / Province",  placeholder="NC",             key="s_state")
-        s_country = st.text_input("Country",           placeholder="United States",   key="s_country")
-        s_zip     = st.text_input("ZIP / Postal Code", placeholder="29708",          key="s_zip")
+        s_state   = st.text_input("State / Province",  placeholder="NC",           key="s_state")
+        s_country = st.text_input("Country",           placeholder="United States", key="s_country")
+        s_zip     = st.text_input("ZIP / Postal Code", placeholder="29708",        key="s_zip")
 
     if any(x.strip() for x in [s_addr1, s_addr2, s_city, s_state, s_country, s_zip]):
-        # Run confidence-scored corrections
+
+        # ── 1. ZIP → State/Country (authoritative override) ───────────────────
+        zip_derived_state   = infer_us_state_from_zip(s_zip.strip())
+        zip_derived_country = "US" if zip_derived_state else ""
+
+        # ── 2. Rule-based corrections with confidence scores ──────────────────
         scores = score_single_address(s_addr1, s_addr2, s_city, s_state, s_country, s_zip)
 
-        # Also apply autofix (updates country/state cross-field) via one-row DataFrame
-        df_s = pd.DataFrame([{
-            "Address":       s_addr1,
-            "Address 2":     s_addr2,
-            "City":          s_city,
-            "State":         s_state,
-            "Country":       s_country,
-            "Postal Code":   s_zip,
-        }])
-        col_map_s = _detect_columns(df_s.columns)
-        result_s  = df_s.copy()
-        for field, orig_col in col_map_s.items():
-            if orig_col is None or field not in CORRECTORS: continue
-            result_s[f"Corrected {DISPLAY_LABELS[field]}"] = df_s[orig_col].apply(CORRECTORS[field])
-        apply_autofix(result_s, col_map_s)
-
-        def _autofix_val(field_key, display_label, fallback):
-            lbl = f"Corrected {display_label}"
-            if lbl in result_s.columns:
-                v = str(result_s[lbl].iloc[0]).strip()
-                if v and v.lower() not in {"nan", "none", ""}:
-                    return v
-            return fallback
-
-        # Merge: prefer autofix result for country/state (cross-field logic), else use scored correction
         addr1_c   = scores["address"]["corrected"]  or s_addr1.strip()
         addr2_c   = scores["address2"]["corrected"] or s_addr2.strip()
         city_c    = scores["city"]["corrected"]     or s_city.strip()
-        state_c   = _autofix_val("state",   "State",       scores["state"]["corrected"]   or s_state.strip())
-        country_c = _autofix_val("country", "Country",     scores["country"]["corrected"] or s_country.strip())
         zip_c     = scores["postal"]["corrected"]   or s_zip.strip()
 
-        # ── Confidence badge helper ───────────────────────────────────────────
-        def _badge(score):
-            pct = f"{score:.0%}"
-            if score >= 0.85:
+        # ZIP prefix beats everything else for state + country
+        if zip_derived_state:
+            state_c   = zip_derived_state
+            country_c = zip_derived_country
+            state_conf, state_method   = 1.0, "zip_derived"
+            country_conf, country_method = 1.0, "zip_derived"
+        else:
+            state_c   = scores["state"]["corrected"]   or s_state.strip()
+            country_c = scores["country"]["corrected"] or s_country.strip()
+            state_conf,   state_method   = scores["state"]["confidence"],   scores["state"]["method"]
+            country_conf, country_method = scores["country"]["confidence"], scores["country"]["method"]
+
+        # ── 3. Auto AI correction (cached per unique input set) ───────────────
+        ai_result = None
+        if _openai_key:
+            if "_ai_cache" not in st.session_state:
+                st.session_state["_ai_cache"] = {}
+            _sig  = f"{s_addr1}|{s_addr2}|{s_city}|{s_state}|{s_country}|{s_zip}"
+            _hash = _hashlib.md5(_sig.encode()).hexdigest()
+            cache = st.session_state["_ai_cache"]
+            if _hash not in cache:
+                with st.spinner("AI correcting address…"):
+                    try:
+                        ai_result = ai_enhance_address(
+                            s_addr1, s_addr2, s_city, s_state, s_country, s_zip, _openai_key
+                        )
+                    except Exception as _exc:
+                        ai_result = {"error": str(_exc)}
+                # Keep cache bounded to last 30 unique inputs
+                if len(cache) >= 30:
+                    for _k in list(cache.keys())[:10]:
+                        del cache[_k]
+                cache[_hash] = ai_result
+            else:
+                ai_result = cache[_hash]
+
+        # Merge AI results on top when available (AI beats rule-based, but ZIP still wins for state)
+        if ai_result and "error" not in ai_result:
+            addr1_c   = ai_result["address"]           or addr1_c
+            addr2_c   = ai_result.get("address2", "")  or addr2_c
+            city_c    = ai_result["city"]               or city_c
+            zip_c     = ai_result["postal"]             or zip_c
+            if not zip_derived_state:
+                state_c   = ai_result["state"]          or state_c
+                country_c = ai_result["country"]        or country_c
+
+        # ── 4. Confidence badge helper ────────────────────────────────────────
+        def _badge(conf, method=""):
+            if method == "zip_derived":
+                return ('<span style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;'
+                        'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
+                        '📌 ZIP</span>')
+            pct = f"{conf:.0%}"
+            if conf >= 0.85:
                 return (f'<span style="background:#dcfce7;color:#15803d;border:1px solid #86efac;'
                         f'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
                         f'● {pct}</span>')
-            elif score >= 0.65:
+            elif conf >= 0.65:
                 return (f'<span style="background:#fefce8;color:#a16207;border:1px solid #fde068;'
                         f'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
                         f'● {pct}</span>')
-            else:
-                return (f'<span style="background:#fef2f2;color:#dc2626;border:1px solid #fecaca;'
-                        f'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
-                        f'● {pct}</span>')
+            return (f'<span style="background:#fef2f2;color:#dc2626;border:1px solid #fecaca;'
+                    f'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
+                    f'● {pct}</span>')
 
-        # ── Build field rows ──────────────────────────────────────────────────
+        # ── 5. Build display rows ─────────────────────────────────────────────
         field_rows = [
-            ("Address",  s_addr1.strip(),   addr1_c,   scores["address"]["confidence"]),
-            ("Addr 2",   s_addr2.strip(),   addr2_c,   scores["address2"]["confidence"]),
-            ("City",     s_city.strip(),    city_c,    scores["city"]["confidence"]),
-            ("State",    s_state.strip(),   state_c,   scores["state"]["confidence"]),
-            ("ZIP",      s_zip.strip(),     zip_c,     scores["postal"]["confidence"]),
-            ("Country",  s_country.strip(), country_c, scores["country"]["confidence"]),
+            ("Address", s_addr1.strip(),   addr1_c,   scores["address"]["confidence"],  scores["address"]["method"]),
+            ("Addr 2",  s_addr2.strip(),   addr2_c,   scores["address2"]["confidence"], scores["address2"]["method"]),
+            ("City",    s_city.strip(),    city_c,    scores["city"]["confidence"],      scores["city"]["method"]),
+            ("State",   s_state.strip(),   state_c,   state_conf,                       state_method),
+            ("ZIP",     s_zip.strip(),     zip_c,     scores["postal"]["confidence"],    scores["postal"]["method"]),
+            ("Country", s_country.strip(), country_c, country_conf,                     country_method),
         ]
 
-        conf_html    = ""
-        changes_html = ""
-        for label, orig, corr, conf in field_rows:
+        conf_html = changes_html = ""
+        for label, orig, corr, conf, method in field_rows:
             if not corr and not orig:
                 continue
             display = corr or orig
@@ -581,10 +610,10 @@ with tab_single:
                 f'font-size:.82rem;margin-bottom:.35rem">'
                 f'<span style="color:#a1a1aa;min-width:72px">{label}</span>'
                 f'<span style="color:#111118;flex:1">{display}</span>'
-                f'{_badge(conf) if orig else ""}'
+                f'{_badge(conf, method) if orig else ""}'
                 f'</div>'
             )
-            if orig and orig.lower() != corr.lower():
+            if orig and orig.upper() != corr.upper():
                 changes_html += (
                     f'<div style="display:flex;gap:.5rem;align-items:center;'
                     f'font-size:.82rem;margin-bottom:.4rem">'
@@ -607,9 +636,13 @@ with tab_single:
                     f'</span></div>'
                 )
 
-        # ── Mailing label ─────────────────────────────────────────────────────
-        line2 = ", ".join(p for p in [city_c, state_c, zip_c] if p)
+        # ── 6. Render result card ─────────────────────────────────────────────
+        line2      = ", ".join(p for p in [city_c, state_c, zip_c] if p)
         addr_block = "<br>".join(p for p in [addr1_c, addr2_c, line2, country_c] if p)
+
+        ai_badge = ('<span style="background:#faf5ff;color:#7c3aed;border:1px solid #e9d5ff;'
+                    'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700;'
+                    'margin-left:.4rem">✨ AI</span>' if (ai_result and "error" not in ai_result) else "")
 
         changes_section = ""
         if changes_html:
@@ -620,11 +653,21 @@ with tab_single:
               {changes_html}
             </div>"""
 
+        if ai_result and "error" in ai_result:
+            st.warning(f"AI correction failed: {ai_result['error']}")
+
+        ai_note_html = ""
+        if ai_result and "error" not in ai_result and ai_result.get("note"):
+            ai_note_html = (f'<div style="margin-top:.8rem;padding-top:.8rem;border-top:1px solid rgba(0,0,0,.06);'
+                            f'color:#7c3aed;font-size:.8rem">✨ {ai_result["note"]}</div>')
+
         st.markdown(f"""
         <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:16px;
                     padding:1.8rem 2rem;margin-top:1.5rem;box-shadow:0 2px 16px rgba(0,0,0,.05)">
           <div style="font-size:.68rem;font-weight:700;letter-spacing:.7px;
-                      text-transform:uppercase;color:#a1a1aa;margin-bottom:.9rem">Corrected address</div>
+                      text-transform:uppercase;color:#a1a1aa;margin-bottom:.9rem">
+            Corrected address{ai_badge}
+          </div>
           <div style="font-size:1.05rem;line-height:1.9;color:#111118;
                       background:#f5f4f0;border-radius:10px;padding:1rem 1.2rem;margin-bottom:1.4rem">
             {addr_block or "<em style='color:#a1a1aa'>—</em>"}
@@ -633,24 +676,15 @@ with tab_single:
                       text-transform:uppercase;color:#a1a1aa;margin-bottom:.6rem">Confidence scores</div>
           {conf_html}
           {changes_section}
+          {ai_note_html}
         </div>
         """, unsafe_allow_html=True)
 
-        # ── Action buttons ────────────────────────────────────────────────────
+        # ── 7. Validate on Map button ─────────────────────────────────────────
         st.markdown("<div style='height:.8rem'></div>", unsafe_allow_html=True)
-        btn1, btn2, _ = st.columns([2, 2, 5])
-        with btn1:
+        vbtn_col, _ = st.columns([2, 7])
+        with vbtn_col:
             validate_clicked = st.button("🗺 Validate on Map", use_container_width=True, key="validate_btn")
-        with btn2:
-            _low_conf = any(
-                scores[f]["confidence"] < 0.65 and scores[f]["original"]
-                for f in ("address", "city", "state", "country", "postal")
-            )
-            ai_label = "✨ AI Enhance" + (" ⚠" if _low_conf else "")
-            ai_clicked = st.button(ai_label, use_container_width=True,
-                                   disabled=not bool(_openai_key), key="ai_btn")
-            if not _openai_key:
-                st.caption("Add OpenAI key in sidebar ↖")
 
         if validate_clicked:
             with st.spinner("Checking OpenStreetMap…"):
@@ -673,31 +707,6 @@ with tab_single:
                   <span style="color:#dc2626;font-weight:700">⚠ {vr['message']}</span>
                 </div>
                 """, unsafe_allow_html=True)
-
-        if ai_clicked and _openai_key:
-            with st.spinner("AI enhancing address…"):
-                try:
-                    ai = ai_enhance_address(s_addr1, s_addr2, s_city, s_state, s_country, s_zip, _openai_key)
-                    ai_l2 = ", ".join(p for p in [ai["city"], ai["state"], ai["postal"]] if p)
-                    ai_block = "<br>".join(p for p in [ai["address"], ai.get("address2",""), ai_l2, ai["country"]] if p)
-                    note_html = (f'<div style="color:#7c3aed;font-size:.8rem;margin-top:.7rem">✨ {ai["note"]}</div>'
-                                 if ai.get("note") else "")
-                    st.markdown(f"""
-                    <div style="background:#faf5ff;border:1px solid #e9d5ff;border-radius:12px;
-                                padding:1.4rem 1.8rem;margin-top:.5rem">
-                      <div style="font-size:.68rem;font-weight:700;letter-spacing:.7px;
-                                  text-transform:uppercase;color:#7c3aed;margin-bottom:.8rem">
-                        ✨ AI Enhanced Address
-                      </div>
-                      <div style="font-size:1.05rem;line-height:1.9;color:#111118;
-                                  background:#f5f4f0;border-radius:10px;padding:1rem 1.2rem">
-                        {ai_block}
-                      </div>
-                      {note_html}
-                    </div>
-                    """, unsafe_allow_html=True)
-                except Exception as exc:
-                    st.error(f"AI enhancement failed: {exc}")
 
     else:
         st.markdown("""
