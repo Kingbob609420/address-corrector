@@ -571,23 +571,31 @@ def correct_city(val):
 
     lower = val.lower()
 
-    # 1. Exact match in known cities → use canonical spelling (Title Case)
+    # 1. Exact match → canonical spelling
     if lower in _ALL_CITIES:
         return _ALL_CITIES[lower]
 
-    # 2. Fuzzy match for misspellings — only for inputs ≥ 4 chars
-    if len(val) >= 4:
+    if len(val) >= 3:
         from difflib import SequenceMatcher
-        candidates = get_close_matches(lower, _ALL_CITY_NAMES, n=5, cutoff=0.82)
+        import math
+
+        def _score(c):
+            sim = SequenceMatcher(None, lower, c).ratio()
+            pop_bonus = math.log10(_CITY_POPULATION.get(c, 0) + 1) * 0.045
+            return sim + pop_bonus
+
+        # 2a. Try large-city pool first (fast, high confidence)
+        candidates = get_close_matches(lower, _LARGE_CITY_NAMES, n=5, cutoff=0.82)
         if candidates:
-            import math
-            def _score(c):
-                sim = SequenceMatcher(None, lower, c).ratio()
-                pop = _CITY_POPULATION.get(c, 0)
-                pop_bonus = math.log10(pop + 1) * 0.045
-                return sim + pop_bonus
             best = max(candidates, key=_score)
             if SequenceMatcher(None, lower, best).ratio() >= 0.82:
+                return _ALL_CITIES[best]
+
+        # 2b. Try full pool (all 5k+ cities) — catches small towns
+        candidates = get_close_matches(lower, _ALL_CITY_NAMES_FULL, n=5, cutoff=0.85)
+        if candidates:
+            best = max(candidates, key=_score)
+            if SequenceMatcher(None, lower, best).ratio() >= 0.85:
                 return _ALL_CITIES[best]
 
     # 3. Fallback — Title Case
@@ -679,32 +687,39 @@ _STATE_FUZZY_INDEX.update({k: v for k, v in AU_STATES.items()})
 _ALL_STATE_NAMES = list(_STATE_FUZZY_INDEX.keys())
 
 # ── City fuzzy index ──────────────────────────────────────────────────────────
-# Only cities with population > 50 000 to keep matching fast and accurate.
+# Include cities with population > 5 000 to catch small towns.
+# Two tiers keep the fuzzy match fast:
+#   _ALL_CITIES / _CITY_POPULATION / _CITY_LOCATION — all cities > 5k
+#   _LARGE_CITY_NAMES — only cities > 50k, used as the preferred fuzzy pool
+#   (small-city fuzzy matching is only attempted when the large-city pool fails)
 _gc = _gnc.GeonamesCache()
 _ALL_CITIES: dict[str, str] = {}         # lowercase → canonical Title Case name
 _CITY_POPULATION: dict[str, int] = {}    # lowercase → population (for tiebreaking)
-# lowercase city → (subcountry/state code, ISO alpha-2 country code)
-_CITY_LOCATION: dict[str, tuple] = {}
+_CITY_LOCATION: dict[str, tuple] = {}    # lowercase → (state_code, country_code)
 
 for _city in _gc.get_cities().values():
-    if _city["population"] > 50_000:
-        _name    = _city["name"]
-        _pop     = _city["population"]
-        _key     = _name.lower()
-        _state_c = (_city.get("subcountrycode") or "").strip().upper()
-        _ctry_c  = (_city.get("countrycode")    or "").strip().upper()
+    _pop = _city.get("population") or 0
+    if _pop < 5_000:
+        continue
+    _name    = _city["name"]
+    _key     = _name.lower()
+    _state_c = (_city.get("subcountrycode") or "").strip().upper()
+    _ctry_c  = (_city.get("countrycode")    or "").strip().upper()
 
-        if _pop > _CITY_POPULATION.get(_key, 0):
-            _ALL_CITIES[_key]      = _name
-            _CITY_POPULATION[_key] = _pop
-            _CITY_LOCATION[_key]   = (_state_c, _ctry_c)
+    if _pop > _CITY_POPULATION.get(_key, 0):
+        _ALL_CITIES[_key]      = _name
+        _CITY_POPULATION[_key] = _pop
+        _CITY_LOCATION[_key]   = (_state_c, _ctry_c)
 
-        _alt = _name.replace(" City", "").replace(" city", "").strip()
-        if _alt and _alt.lower() != _key:
-            if _pop > _CITY_POPULATION.get(_alt.lower(), 0):
-                _ALL_CITIES[_alt.lower()]      = _name
-                _CITY_POPULATION[_alt.lower()] = _pop
-                _CITY_LOCATION[_alt.lower()]   = (_state_c, _ctry_c)
+    _alt = _name.replace(" City", "").replace(" city", "").strip()
+    if _alt and _alt.lower() != _key:
+        if _pop > _CITY_POPULATION.get(_alt.lower(), 0):
+            _ALL_CITIES[_alt.lower()]      = _name
+            _CITY_POPULATION[_alt.lower()] = _pop
+            _CITY_LOCATION[_alt.lower()]   = (_state_c, _ctry_c)
+
+_LARGE_CITY_NAMES = [k for k, v in _CITY_POPULATION.items() if v >= 50_000]
+_ALL_CITY_NAMES_FULL = list(_ALL_CITIES.keys())   # all 5k+ cities
 
 # Explicit common aliases not in geonamescache
 _CITY_ALIASES = {
@@ -719,7 +734,7 @@ _CITY_ALIASES = {
     "chi":         "Chicago",
 }
 _ALL_CITIES.update(_CITY_ALIASES)
-_ALL_CITY_NAMES = list(_ALL_CITIES.keys())
+_ALL_CITY_NAMES = _ALL_CITY_NAMES_FULL   # alias used by existing code
 
 
 def infer_state_from_city(city: str, country_hint: str = "") -> tuple:
@@ -744,8 +759,8 @@ def infer_state_from_city(city: str, country_hint: str = "") -> tuple:
         if not country_hint or country_hint.upper() == country:
             return (state, country)
 
-    # Fuzzy match (same threshold as correct_city)
-    candidates = get_close_matches(lower, list(_CITY_LOCATION.keys()), n=5, cutoff=0.82)
+    # Fuzzy match against full city pool
+    candidates = get_close_matches(lower, list(_CITY_LOCATION.keys()), n=8, cutoff=0.82)
     if candidates:
         from difflib import SequenceMatcher
         import math
@@ -1446,20 +1461,34 @@ def _city_confidence(val: str) -> tuple:
     if not val_clean:
         return "", 1.0, "empty"
     lower = val_clean.lower()
+
     if lower in _ALL_CITIES:
-        corrected = _ALL_CITIES[lower]           # canonical Title Case spelling
+        corrected = _ALL_CITIES[lower]
         return corrected, (0.95 if corrected.lower() != lower else 1.0), "exact"
-    if len(val_clean) >= 4:
-        candidates = get_close_matches(lower, _ALL_CITY_NAMES, n=5, cutoff=0.82)
+
+    def _sc(c):
+        sim = SequenceMatcher(None, lower, c).ratio()
+        return sim + math.log10(_CITY_POPULATION.get(c, 0) + 1) * 0.045
+
+    if len(val_clean) >= 3:
+        # Large-city pool (pop ≥ 50k) — high confidence
+        candidates = get_close_matches(lower, _LARGE_CITY_NAMES, n=5, cutoff=0.82)
         if candidates:
-            def _sc(c):
-                sim = SequenceMatcher(None, lower, c).ratio()
-                return sim + math.log10(_CITY_POPULATION.get(c, 0) + 1) * 0.045
             best = max(candidates, key=_sc)
             ratio = SequenceMatcher(None, lower, best).ratio()
             if ratio >= 0.82:
                 conf = round(0.72 + (ratio - 0.82) * 1.4, 2)
-                return _ALL_CITIES[best], min(conf, 0.92), "fuzzy"
+                return _ALL_CITIES[best], min(conf, 0.92), "fuzzy_large"
+
+        # Full pool (pop ≥ 5k) — slightly lower confidence
+        candidates = get_close_matches(lower, _ALL_CITY_NAMES_FULL, n=5, cutoff=0.85)
+        if candidates:
+            best = max(candidates, key=_sc)
+            ratio = SequenceMatcher(None, lower, best).ratio()
+            if ratio >= 0.85:
+                conf = round(0.68 + (ratio - 0.85) * 1.4, 2)
+                return _ALL_CITIES[best], min(conf, 0.88), "fuzzy_small"
+
     return val_clean.title(), 0.45, "fallback"
 
 
