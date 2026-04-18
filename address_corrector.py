@@ -844,7 +844,7 @@ _POSTAL_PATTERNS: list[tuple] = [
     (re.compile(r"^DE-\d{5}$"),                                "DE"),
 ]
 
-def detect_country_from_postal(postal: str) -> str | None:
+def detect_country_from_postal(postal: str):
     """Return ISO alpha-2 country code inferred from postal code format, or None."""
     if not postal:
         return None
@@ -883,7 +883,7 @@ _CA_FSA_PROVINCE: dict[str, str] = {
 _US_STATE_CODES = set(US_STATES.values())
 
 
-def infer_province_from_canadian_postal(postal: str) -> str | None:
+def infer_province_from_canadian_postal(postal: str):
     """Return the 2-letter Canadian province code from a postal code's FSA letter."""
     if not postal:
         return None
