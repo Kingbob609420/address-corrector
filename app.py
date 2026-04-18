@@ -9,7 +9,7 @@ importlib.reload(_ac)
 from address_corrector import (
     CORRECTORS, DISPLAY_LABELS, _detect_columns, _write_excel, apply_autofix,
     score_single_address, ai_enhance_address, validate_address_nominatim,
-    infer_us_state_from_zip,
+    infer_us_state_from_zip, infer_state_from_city,
 )
 
 
@@ -546,14 +546,22 @@ with tab_single:
             state_c   = _ai_val(ai_result.get("state"),    state_c)
             country_c = _ai_val(ai_result.get("country"),  country_c)
 
-        # ── 3. ZIP → State override — runs LAST, always wins ─────────────────
-        # Use raw user input directly — never trust processed/AI-modified zip for this lookup
+        # ── 3. ZIP → State (authoritative) or City → State fallback ─────────
         zip_derived_state = infer_us_state_from_zip(s_zip.strip()) or infer_us_state_from_zip(zip_c)
         if zip_derived_state:
             state_c   = zip_derived_state
             country_c = "US"
             state_conf,   state_method   = 1.0, "zip_derived"
             country_conf, country_method = 1.0, "zip_derived"
+        elif not s_zip.strip():
+            # No ZIP provided — infer state/country from city name
+            city_state, city_country = infer_state_from_city(city_c, country_c)
+            if city_state and not state_c:
+                state_c   = city_state
+                state_conf, state_method = 0.80, "city_derived"
+            if city_country and not country_c:
+                country_c = city_country
+                country_conf, country_method = 0.80, "city_derived"
 
         # ── 4. Confidence badge helper ────────────────────────────────────────
         def _badge(conf, method=""):
@@ -561,6 +569,10 @@ with tab_single:
                 return ('<span style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;'
                         'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
                         '📌 ZIP</span>')
+            if method == "city_derived":
+                return ('<span style="background:#fdf4ff;color:#7c3aed;border:1px solid #e9d5ff;'
+                        'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
+                        '🏙 City</span>')
             pct = f"{conf:.0%}"
             if conf >= 0.85:
                 return (f'<span style="background:#dcfce7;color:#15803d;border:1px solid #86efac;'

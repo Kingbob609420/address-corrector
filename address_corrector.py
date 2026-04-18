@@ -683,21 +683,28 @@ _ALL_STATE_NAMES = list(_STATE_FUZZY_INDEX.keys())
 _gc = _gnc.GeonamesCache()
 _ALL_CITIES: dict[str, str] = {}         # lowercase → canonical Title Case name
 _CITY_POPULATION: dict[str, int] = {}    # lowercase → population (for tiebreaking)
+# lowercase city → (subcountry/state code, ISO alpha-2 country code)
+_CITY_LOCATION: dict[str, tuple] = {}
+
 for _city in _gc.get_cities().values():
     if _city["population"] > 50_000:
-        _name = _city["name"]
-        _pop  = _city["population"]
-        _key  = _name.lower()
-        # Keep the higher-population entry when names collide (e.g. multiple "Springfield")
+        _name    = _city["name"]
+        _pop     = _city["population"]
+        _key     = _name.lower()
+        _state_c = (_city.get("subcountrycode") or "").strip().upper()
+        _ctry_c  = (_city.get("countrycode")    or "").strip().upper()
+
         if _pop > _CITY_POPULATION.get(_key, 0):
             _ALL_CITIES[_key]      = _name
             _CITY_POPULATION[_key] = _pop
-        # Also index name without " City" suffix  ("New York City" → "new york")
+            _CITY_LOCATION[_key]   = (_state_c, _ctry_c)
+
         _alt = _name.replace(" City", "").replace(" city", "").strip()
         if _alt and _alt.lower() != _key:
             if _pop > _CITY_POPULATION.get(_alt.lower(), 0):
                 _ALL_CITIES[_alt.lower()]      = _name
                 _CITY_POPULATION[_alt.lower()] = _pop
+                _CITY_LOCATION[_alt.lower()]   = (_state_c, _ctry_c)
 
 # Explicit common aliases not in geonamescache
 _CITY_ALIASES = {
@@ -713,6 +720,52 @@ _CITY_ALIASES = {
 }
 _ALL_CITIES.update(_CITY_ALIASES)
 _ALL_CITY_NAMES = list(_ALL_CITIES.keys())
+
+
+def infer_state_from_city(city: str, country_hint: str = "") -> tuple:
+    """
+    Return (state_code, country_code) inferred from city name.
+    Uses geonamescache data (population > 50k cities).
+    Disambiguates by country_hint when the same city name exists in multiple countries.
+    Returns ("", "") if no match found.
+    """
+    if not city:
+        return ("", "")
+    lower = city.strip().lower()
+
+    # Resolve alias first (e.g. "nyc" → "new york city")
+    if lower in _CITY_ALIASES:
+        lower = _CITY_ALIASES[lower].lower()
+
+    # Exact match
+    if lower in _CITY_LOCATION:
+        state, country = _CITY_LOCATION[lower]
+        # If country_hint provided and matches, use this entry directly
+        if not country_hint or country_hint.upper() == country:
+            return (state, country)
+
+    # Fuzzy match (same threshold as correct_city)
+    candidates = get_close_matches(lower, list(_CITY_LOCATION.keys()), n=5, cutoff=0.82)
+    if candidates:
+        from difflib import SequenceMatcher
+        import math
+
+        def _sc(c):
+            sim = SequenceMatcher(None, lower, c).ratio()
+            return sim + math.log10(_CITY_POPULATION.get(c, 0) + 1) * 0.045
+
+        # Prefer matches whose country matches the hint
+        if country_hint:
+            hint_matches = [c for c in candidates
+                            if _CITY_LOCATION.get(c, ("", ""))[1] == country_hint.upper()]
+            if hint_matches:
+                candidates = hint_matches
+
+        best = max(candidates, key=_sc)
+        if SequenceMatcher(None, lower, best).ratio() >= 0.82:
+            return _CITY_LOCATION.get(best, ("", ""))
+
+    return ("", "")
 
 
 def correct_country(val):
