@@ -499,9 +499,8 @@ with tab_single:
 
     if any(x.strip() for x in [s_addr1, s_addr2, s_city, s_state, s_country, s_zip]):
 
-        # ── 1. Rule-based corrections with confidence scores ──────────────────
-        scores = score_single_address(s_addr1, s_addr2, s_city, s_state, s_country, s_zip)
-
+        # ── 1. Rule-based corrections ─────────────────────────────────────────
+        scores    = score_single_address(s_addr1, s_addr2, s_city, s_state, s_country, s_zip)
         addr1_c   = scores["address"]["corrected"]  or s_addr1.strip()
         addr2_c   = scores["address2"]["corrected"] or s_addr2.strip()
         city_c    = scores["city"]["corrected"]     or s_city.strip()
@@ -511,36 +510,31 @@ with tab_single:
         state_conf,   state_method   = scores["state"]["confidence"],   scores["state"]["method"]
         country_conf, country_method = scores["country"]["confidence"], scores["country"]["method"]
         zip_conf,     zip_method     = scores["postal"]["confidence"],  scores["postal"]["method"]
-
         _no_zip = not s_zip.strip()
 
-        # ── 2. Auto AI correction (cached per unique input set) ───────────────
+        # ── 2. AI: correct spelling/format of the address (no ZIP inference yet) ─
         ai_result = None
         if _openai_key:
             if "_ai_cache" not in st.session_state:
                 st.session_state["_ai_cache"] = {}
-            _sig  = f"{s_addr1}|{s_addr2}|{s_city}|{s_state}|{s_country}|{s_zip}|infer={_no_zip}"
+            _sig  = f"{s_addr1}|{s_addr2}|{s_city}|{s_state}|{s_country}|{s_zip}"
             _hash = _hashlib.md5(_sig.encode()).hexdigest()
             cache = st.session_state["_ai_cache"]
             if _hash not in cache:
-                _spinner_msg = "AI looking up ZIP and correcting address…" if _no_zip else "AI correcting address…"
-                with st.spinner(_spinner_msg):
+                with st.spinner("Correcting address…"):
                     try:
-                        ai_result = ai_enhance_address(
+                        cache[_hash] = ai_enhance_address(
                             s_addr1, s_addr2, s_city, s_state, s_country, s_zip,
-                            _openai_key, infer_postal=_no_zip,
+                            _openai_key, infer_postal=False,
                         )
                     except Exception as _exc:
-                        ai_result = {"error": str(_exc)}
+                        cache[_hash] = {"error": str(_exc)}
                 if len(cache) >= 30:
                     for _k in list(cache.keys())[:10]:
                         del cache[_k]
-                cache[_hash] = ai_result
-            else:
-                ai_result = cache[_hash]
+            ai_result = cache[_hash]
 
         def _ai_val(v, fallback):
-            """Return AI value only if non-empty and not a placeholder string."""
             clean = str(v or "").strip()
             return clean if clean and clean.lower() not in {"(blank)", "blank", "none", "nan", ""} else fallback
 
@@ -550,23 +544,22 @@ with tab_single:
             city_c    = _ai_val(ai_result.get("city"),     city_c)
             state_c   = _ai_val(ai_result.get("state"),    state_c)
             country_c = _ai_val(ai_result.get("country"),  country_c)
-            _ai_zip   = _ai_val(ai_result.get("postal"),   "")
-            if _ai_zip and _ai_zip != zip_c:
-                zip_c       = _ai_zip
-                zip_conf    = 0.88
-                zip_method  = "ai_inferred"
+            if not _no_zip:   # only reformat postal when user supplied one
+                _ai_zip = _ai_val(ai_result.get("postal"), "")
+                if _ai_zip:
+                    zip_c = _ai_zip
 
-        # ── 3. ZIP → State (authoritative) or City → State / Nominatim fallback ─
+        # ── 3. Authoritative ZIP → state when ZIP was already supplied ────────
         zip_derived_state = infer_us_state_from_zip(s_zip.strip()) or infer_us_state_from_zip(zip_c)
         if zip_derived_state:
             state_c       = zip_derived_state
             country_c     = "US"
             state_conf,   state_method   = 1.0, "zip_derived"
             country_conf, country_method = 1.0, "zip_derived"
-            if not s_zip.strip() and zip_c:
-                zip_conf, zip_method = 1.0, "zip_derived"
+
+        # ── 4. No ZIP supplied — look it up using the CORRECTED address ───────
         elif _no_zip:
-            # No ZIP provided — infer state/country from city name
+            # 4a. city → state/country seed
             city_state, city_country = infer_state_from_city(city_c, country_c)
             if city_state and not state_c:
                 state_c     = city_state
@@ -575,35 +568,61 @@ with tab_single:
                 country_c   = city_country
                 country_conf, country_method = 0.80, "city_derived"
 
-            # Nominatim fallback — only if AI didn't already fill in a ZIP
-            if not zip_c.strip() and any(x.strip() for x in [addr1_c, city_c, state_c, country_c]):
+            # 4b. Nominatim — query with corrected fields
+            if any(x.strip() for x in [addr1_c, city_c, state_c, country_c]):
                 _zip_sig  = f"zip|{addr1_c}|{city_c}|{state_c}|{country_c}"
                 _zip_hash = _hashlib.md5(_zip_sig.encode()).hexdigest()
                 if "_zip_cache" not in st.session_state:
                     st.session_state["_zip_cache"] = {}
                 _zip_cache = st.session_state["_zip_cache"]
                 if _zip_hash not in _zip_cache:
-                    with st.spinner("Looking up ZIP / postal code via OpenStreetMap…"):
+                    with st.spinner("Looking up ZIP for corrected address via OpenStreetMap…"):
                         try:
                             _zip_cache[_zip_hash] = lookup_postal_from_address(
                                 addr1_c, city_c, state_c, country_c
                             )
                         except Exception:
                             _zip_cache[_zip_hash] = ""
-                looked_up_zip = _zip_cache.get(_zip_hash, "")
-                if looked_up_zip:
-                    zip_c      = correct_postal_code(looked_up_zip)
+                _osm_zip = _zip_cache.get(_zip_hash, "")
+                if _osm_zip:
+                    zip_c      = correct_postal_code(_osm_zip)
                     zip_conf   = 0.82
                     zip_method = "nominatim"
-                    # Re-derive state from new ZIP if it's a US ZIP
-                    _zdstate = infer_us_state_from_zip(zip_c)
-                    if _zdstate:
-                        state_c       = _zdstate
-                        country_c     = "US"
-                        state_conf,   state_method   = 1.0, "zip_derived"
-                        country_conf, country_method = 1.0, "zip_derived"
 
-        # ── 4. Confidence badge helper ────────────────────────────────────────
+            # 4c. AI fallback with CORRECTED fields — only if Nominatim found nothing
+            if not zip_c.strip() and _openai_key:
+                _zip_ai_sig  = f"zipai|{addr1_c}|{city_c}|{state_c}|{country_c}"
+                _zip_ai_hash = _hashlib.md5(_zip_ai_sig.encode()).hexdigest()
+                if "_zip_cache" not in st.session_state:
+                    st.session_state["_zip_cache"] = {}
+                _zip_cache = st.session_state["_zip_cache"]
+                if _zip_ai_hash not in _zip_cache:
+                    with st.spinner("Asking AI to find ZIP for corrected address…"):
+                        try:
+                            _zr = ai_enhance_address(
+                                addr1_c, addr2_c, city_c, state_c, country_c, "",
+                                _openai_key, infer_postal=True,
+                            )
+                            _zip_cache[_zip_ai_hash] = _ai_val(_zr.get("postal"), "")
+                        except Exception:
+                            _zip_cache[_zip_ai_hash] = ""
+                _ai_found_zip = _zip_cache.get(_zip_ai_hash, "")
+                if _ai_found_zip:
+                    zip_c      = correct_postal_code(_ai_found_zip)
+                    zip_conf   = 0.88
+                    zip_method = "ai_inferred"
+
+            # 4d. Re-pin state/country from the newly found ZIP
+            if zip_c:
+                _zdstate = infer_us_state_from_zip(zip_c)
+                if _zdstate:
+                    state_c       = _zdstate
+                    country_c     = "US"
+                    state_conf,   state_method   = 1.0, "zip_derived"
+                    country_conf, country_method = 1.0, "zip_derived"
+                    zip_conf,     zip_method     = 1.0, "zip_derived"
+
+        # ── 5. Confidence badge helper ────────────────────────────────────────
         def _badge(conf, method=""):
             if method == "zip_derived":
                 return ('<span style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;'
@@ -634,7 +653,7 @@ with tab_single:
                     f'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
                     f'● {pct}</span>')
 
-        # ── 5. Build display rows ─────────────────────────────────────────────
+        # ── 6. Build field rows ───────────────────────────────────────────────
         field_rows = [
             ("Address", s_addr1.strip(),   addr1_c,   scores["address"]["confidence"],  scores["address"]["method"]),
             ("Addr 2",  s_addr2.strip(),   addr2_c,   scores["address2"]["confidence"], scores["address2"]["method"]),
@@ -646,13 +665,11 @@ with tab_single:
 
         conf_html = changes_html = ""
         for label, orig, corr, conf, method in field_rows:
-            # Always render every field — show "—" when empty so layout is complete
             display      = corr or orig
             is_empty     = not display
             display_html = (f'<span style="color:#d4d4d8">—</span>' if is_empty
                             else f'<span style="color:#111118">{display}</span>')
-            # Badge: show for any non-empty corrected value
-            badge_html = _badge(conf, method) if display else ""
+            badge_html   = _badge(conf, method) if display else ""
             conf_html += (
                 f'<div style="display:flex;gap:.5rem;align-items:center;'
                 f'font-size:.82rem;margin-bottom:.35rem">'
@@ -680,13 +697,23 @@ with tab_single:
                     f'<span style="color:#a1a1aa;min-width:72px">{label}</span>'
                     f'<span style="color:#15803d;background:#f0fdf4;border:1px solid #86efac;'
                     f'border-radius:6px;padding:.15rem .5rem;font-weight:600">'
-                    f'✦ {corr} <span style="font-weight:400;opacity:.7">(auto-detected)</span>'
+                    f'✦ {corr} <span style="font-weight:400;opacity:.7">(auto-filled)</span>'
                     f'</span></div>'
                 )
 
-        # ── 6. Render result card ─────────────────────────────────────────────
-        line2      = ", ".join(p for p in [city_c, state_c, zip_c] if p)
-        addr_block = "<br>".join(p for p in [addr1_c, addr2_c, line2, country_c] if p)
+        # ── 7. Render result card (all 6 fields always shown) ─────────────────
+        def _fval(v): return v if v.strip() else '<span style="color:#d4d4d8">—</span>'
+        addr_block = (
+            f'<div style="display:grid;grid-template-columns:auto 1fr;gap:.25rem .9rem;'
+            f'font-size:.9rem;line-height:1.75">'
+            f'<span style="color:#a1a1aa">Address</span><span>{_fval(addr1_c)}</span>'
+            + (f'<span style="color:#a1a1aa">Addr 2</span><span>{_fval(addr2_c)}</span>' if addr2_c.strip() else '')
+            + f'<span style="color:#a1a1aa">City</span><span>{_fval(city_c)}</span>'
+            f'<span style="color:#a1a1aa">State</span><span>{_fval(state_c)}</span>'
+            f'<span style="color:#a1a1aa">ZIP</span><span>{_fval(zip_c)}</span>'
+            f'<span style="color:#a1a1aa">Country</span><span>{_fval(country_c)}</span>'
+            f'</div>'
+        )
 
         ai_badge = ('<span style="background:#faf5ff;color:#7c3aed;border:1px solid #e9d5ff;'
                     'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700;'
@@ -695,7 +722,7 @@ with tab_single:
         changes_section = (
             f'<div style="margin-top:1.2rem;padding-top:1.2rem;border-top:1px solid rgba(0,0,0,.06)">'
             f'<div style="font-size:.68rem;font-weight:700;letter-spacing:.7px;text-transform:uppercase;'
-            f'color:#a1a1aa;margin-bottom:.6rem">Changes made</div>'
+            f'color:#a1a1aa;margin-bottom:.6rem">Changes &amp; auto-filled fields</div>'
             f'{changes_html}</div>'
         ) if changes_html else ""
 
@@ -714,12 +741,11 @@ with tab_single:
                       text-transform:uppercase;color:#a1a1aa;margin-bottom:.9rem">
             Corrected address{ai_badge}
           </div>
-          <div style="font-size:1.05rem;line-height:1.9;color:#111118;
-                      background:#f5f4f0;border-radius:10px;padding:1rem 1.2rem;margin-bottom:1.4rem">
-            {addr_block or "<em style='color:#a1a1aa'>—</em>"}
+          <div style="background:#f5f4f0;border-radius:10px;padding:1rem 1.2rem;margin-bottom:1.4rem">
+            {addr_block}
           </div>
           <div style="font-size:.68rem;font-weight:700;letter-spacing:.7px;
-                      text-transform:uppercase;color:#a1a1aa;margin-bottom:.6rem">Confidence scores</div>
+                      text-transform:uppercase;color:#a1a1aa;margin-bottom:.6rem">Field confidence</div>
           {conf_html}
           {changes_section}
           {ai_note_html}
