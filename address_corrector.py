@@ -1668,65 +1668,82 @@ def ai_enhance_address(addr1: str, addr2: str, city: str, state: str, country: s
 
 def validate_address_nominatim(addr1: str, city: str, state: str, country: str, postal: str) -> dict:
     """
-    Geocode via OpenStreetMap Nominatim with progressive fallback queries.
-    Tries increasingly broad queries until one succeeds.
-    Returns {"valid", "display_name", "lat", "lon", "message", "strategy"}.
+    Geocode the corrected address via Nominatim using structured field parameters
+    (street=, city=, state=, postalcode=, country=) with progressive broadening.
+    Returns {"valid", "display_name", "lat", "lon", "message", "strategy",
+             "matched_postcode", "matched_city", "matched_state"}.
     """
     import requests
     import time
 
-    def _p(*vals):
-        return [v for v in vals if v and v.strip()]
+    HEADERS = {"User-Agent": "AddressCorrectorApp/1.0"}
+    TIMEOUT = 7
 
-    # Ordered from most specific to broadest — stop at first hit
-    strategies = [
-        ("Full address",            _p(addr1, city, state, postal, country)),
-        ("Street + ZIP + country",  _p(addr1, postal, country)),
-        ("Street + city + country", _p(addr1, city, country)),
-        ("City + state + ZIP",      _p(city, state, postal, country)),
-        ("City + state + country",  _p(city, state, country)),
-        ("ZIP + country",           _p(postal, country)),
-    ]
-
-    # Remove duplicate / empty strategies
-    seen = set()
-    unique_strategies = []
-    for label, parts in strategies:
-        key = tuple(parts)
-        if key and key not in seen:
-            seen.add(key)
-            unique_strategies.append((label, parts))
-
-    last_error = "No address components to search"
-    for label, parts in unique_strategies:
+    def _call(params: dict):
+        base = {"format": "json", "limit": 1, "addressdetails": 1}
+        base.update(params)
         try:
             r = requests.get(
                 "https://nominatim.openstreetmap.org/search",
-                params={"q": ", ".join(parts), "format": "json", "limit": 1, "addressdetails": 1},
-                headers={"User-Agent": "AddressCorrectorApp/1.0"},
-                timeout=6,
+                params=base, headers=HEADERS, timeout=TIMEOUT,
             )
             r.raise_for_status()
             data = r.json()
             if data:
-                best = data[0]
-                return {
-                    "valid":        True,
-                    "display_name": best.get("display_name", ""),
-                    "lat":          float(best.get("lat", 0)),
-                    "lon":          float(best.get("lon", 0)),
-                    "message":      f"Found on OpenStreetMap ({label})",
-                    "strategy":     label,
-                }
-            last_error = f'Not found via "{label}"'
-            time.sleep(0.3)   # Nominatim rate-limit: 1 req/sec
-        except Exception as exc:
-            last_error = f'Error on "{label}": {str(exc)[:60]}'
-            time.sleep(0.3)
+                return data[0]
+        except Exception:
+            pass
+        time.sleep(0.4)
+        return None
 
-    return {"valid": False, "display_name": "", "lat": 0.0, "lon": 0.0,
-            "message": f"Address not found after trying all fallback strategies. Last: {last_error}",
-            "strategy": None}
+    a1 = addr1.strip()
+    ct = city.strip()
+    st = state.strip()
+    co = country.strip()
+    pc = postal.strip()
+
+    # Strategies — structured params, most specific first
+    strategies = []
+    if a1 and ct and pc:
+        strategies.append(("Street + city + ZIP",    {"street": a1, "city": ct, "postalcode": pc, "country": co}))
+    if a1 and ct and st:
+        strategies.append(("Street + city + state",  {"street": a1, "city": ct, "state": st, "country": co}))
+    if a1 and pc:
+        strategies.append(("Street + ZIP",           {"street": a1, "postalcode": pc, "country": co}))
+    if a1 and ct:
+        strategies.append(("Street + city",          {"street": a1, "city": ct, "country": co}))
+    if ct and pc:
+        strategies.append(("City + ZIP",             {"city": ct, "postalcode": pc, "country": co}))
+    if ct and st:
+        strategies.append(("City + state",           {"city": ct, "state": st, "country": co}))
+    if pc and co:
+        strategies.append(("ZIP + country",          {"postalcode": pc, "country": co}))
+    elif pc:
+        strategies.append(("ZIP only",               {"postalcode": pc}))
+
+    last_error = "No address components to search"
+    for label, params in strategies:
+        hit = _call(params)
+        if hit:
+            addr_detail = hit.get("address", {})
+            return {
+                "valid":            True,
+                "display_name":     hit.get("display_name", ""),
+                "lat":              float(hit.get("lat", 0)),
+                "lon":              float(hit.get("lon", 0)),
+                "message":          f"Found ({label})",
+                "strategy":         label,
+                "matched_postcode": addr_detail.get("postcode", ""),
+                "matched_city":     addr_detail.get("city") or addr_detail.get("town") or addr_detail.get("village") or "",
+                "matched_state":    addr_detail.get("state", ""),
+            }
+        last_error = f'Not found via "{label}"'
+
+    return {
+        "valid": False, "display_name": "", "lat": 0.0, "lon": 0.0,
+        "message": f"Address not found. Last: {last_error}",
+        "strategy": None, "matched_postcode": "", "matched_city": "", "matched_state": "",
+    }
 
 
 def lookup_postal_from_address(addr1: str, city: str, state: str, country: str) -> str:

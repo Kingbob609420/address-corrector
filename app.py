@@ -769,21 +769,61 @@ with tab_single:
             validate_clicked = st.button("🗺 Validate on Map", use_container_width=True, key="validate_btn")
 
         if validate_clicked:
-            with st.spinner("Searching OpenStreetMap (trying multiple strategies)…"):
+            with st.spinner("Validating corrected address on OpenStreetMap…"):
                 vr = validate_address_nominatim(addr1_c, city_c, state_c, country_c, zip_c)
             if vr["valid"]:
                 maps_url = f"https://www.openstreetmap.org/?mlat={vr['lat']}&mlon={vr['lon']}&zoom=16"
-                strategy_note = f' <span style="color:#71717a;font-size:.75rem">via {vr["strategy"]}</span>' if vr.get("strategy") else ""
+
+                # Build a comparison: corrected vs matched
+                def _cmp_row(label, corrected, matched):
+                    match = matched.strip() if matched else ""
+                    corr  = corrected.strip() if corrected else ""
+                    if not corr and not match:
+                        return ""
+                    if match and corr and match.upper() != corr.upper():
+                        indicator = '<span style="color:#ca8a04;font-size:.7rem;margin-left:.3rem">⚠ differs</span>'
+                    else:
+                        indicator = '<span style="color:#15803d;font-size:.7rem;margin-left:.3rem">✓</span>' if match else ""
+                    return (
+                        f'<tr>'
+                        f'<td style="color:#a1a1aa;padding:.18rem .6rem .18rem 0;white-space:nowrap">{label}</td>'
+                        f'<td style="padding:.18rem .6rem .18rem 0;font-weight:600">{corr or "—"}</td>'
+                        f'<td style="color:#52525b;padding:.18rem 0">{match or "—"}{indicator}</td>'
+                        f'</tr>'
+                    )
+
+                rows = (
+                    _cmp_row("City",    city_c,    vr.get("matched_city", ""))
+                    + _cmp_row("State",   state_c,   vr.get("matched_state", ""))
+                    + _cmp_row("ZIP",     zip_c,     vr.get("matched_postcode", ""))
+                )
+                table = (
+                    f'<table style="font-size:.78rem;border-collapse:collapse;margin-top:.6rem;width:100%">'
+                    f'<thead><tr>'
+                    f'<th style="color:#a1a1aa;font-weight:600;text-align:left;padding:.18rem .6rem .18rem 0"></th>'
+                    f'<th style="color:#a1a1aa;font-weight:600;text-align:left;padding:.18rem .6rem .18rem 0">Corrected</th>'
+                    f'<th style="color:#a1a1aa;font-weight:600;text-align:left;padding:.18rem 0">OSM matched</th>'
+                    f'</tr></thead><tbody>{rows}</tbody></table>'
+                ) if rows else ""
+
                 st.markdown(
-                    f'<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:.85rem 1.1rem;font-size:.84rem">'
-                    f'<span style="color:#15803d;font-weight:700">✓ Address found</span>{strategy_note}'
-                    f'&nbsp;<a href="{maps_url}" target="_blank" style="color:#15803d;text-decoration:underline">View on map ↗</a><br>'
-                    f'<span style="color:#71717a;font-size:.78rem">{vr["display_name"]}</span></div>',
+                    f'<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;'
+                    f'padding:.9rem 1.1rem;font-size:.84rem">'
+                    f'<div style="display:flex;justify-content:space-between;align-items:center">'
+                    f'<span style="color:#15803d;font-weight:700">✓ Address verified on map</span>'
+                    f'<a href="{maps_url}" target="_blank" style="color:#15803d;font-size:.78rem;'
+                    f'text-decoration:underline">View on map ↗</a></div>'
+                    f'{table}'
+                    f'<div style="color:#71717a;font-size:.72rem;margin-top:.5rem;'
+                    f'border-top:1px solid rgba(0,0,0,.06);padding-top:.4rem">'
+                    f'{vr["display_name"]}</div>'
+                    f'</div>',
                     unsafe_allow_html=True,
                 )
             else:
                 st.markdown(
-                    f'<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:.85rem 1.1rem;font-size:.84rem">'
+                    f'<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;'
+                    f'padding:.85rem 1.1rem;font-size:.84rem">'
                     f'<span style="color:#dc2626;font-weight:700">⚠ {vr["message"]}</span></div>',
                     unsafe_allow_html=True,
                 )
