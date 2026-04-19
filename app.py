@@ -10,6 +10,7 @@ from address_corrector import (
     CORRECTORS, DISPLAY_LABELS, _detect_columns, _write_excel, apply_autofix,
     score_single_address, ai_enhance_address, validate_address_nominatim,
     infer_us_state_from_zip, infer_state_from_city,
+    lookup_postal_from_address, correct_postal_code,
 )
 
 
@@ -509,20 +510,25 @@ with tab_single:
         country_c = scores["country"]["corrected"]  or s_country.strip()
         state_conf,   state_method   = scores["state"]["confidence"],   scores["state"]["method"]
         country_conf, country_method = scores["country"]["confidence"], scores["country"]["method"]
+        zip_conf,     zip_method     = scores["postal"]["confidence"],  scores["postal"]["method"]
+
+        _no_zip = not s_zip.strip()
 
         # ── 2. Auto AI correction (cached per unique input set) ───────────────
         ai_result = None
         if _openai_key:
             if "_ai_cache" not in st.session_state:
                 st.session_state["_ai_cache"] = {}
-            _sig  = f"{s_addr1}|{s_addr2}|{s_city}|{s_state}|{s_country}|{s_zip}"
+            _sig  = f"{s_addr1}|{s_addr2}|{s_city}|{s_state}|{s_country}|{s_zip}|infer={_no_zip}"
             _hash = _hashlib.md5(_sig.encode()).hexdigest()
             cache = st.session_state["_ai_cache"]
             if _hash not in cache:
-                with st.spinner("AI correcting address…"):
+                _spinner_msg = "AI looking up ZIP and correcting address…" if _no_zip else "AI correcting address…"
+                with st.spinner(_spinner_msg):
                     try:
                         ai_result = ai_enhance_address(
-                            s_addr1, s_addr2, s_city, s_state, s_country, s_zip, _openai_key
+                            s_addr1, s_addr2, s_city, s_state, s_country, s_zip,
+                            _openai_key, infer_postal=_no_zip,
                         )
                     except Exception as _exc:
                         ai_result = {"error": str(_exc)}
@@ -542,26 +548,60 @@ with tab_single:
             addr1_c   = _ai_val(ai_result.get("address"),  addr1_c)
             addr2_c   = _ai_val(ai_result.get("address2"), addr2_c)
             city_c    = _ai_val(ai_result.get("city"),     city_c)
-            zip_c     = _ai_val(ai_result.get("postal"),   zip_c)
             state_c   = _ai_val(ai_result.get("state"),    state_c)
             country_c = _ai_val(ai_result.get("country"),  country_c)
+            _ai_zip   = _ai_val(ai_result.get("postal"),   "")
+            if _ai_zip and _ai_zip != zip_c:
+                zip_c       = _ai_zip
+                zip_conf    = 0.88
+                zip_method  = "ai_inferred"
 
-        # ── 3. ZIP → State (authoritative) or City → State fallback ─────────
+        # ── 3. ZIP → State (authoritative) or City → State / Nominatim fallback ─
         zip_derived_state = infer_us_state_from_zip(s_zip.strip()) or infer_us_state_from_zip(zip_c)
         if zip_derived_state:
-            state_c   = zip_derived_state
-            country_c = "US"
+            state_c       = zip_derived_state
+            country_c     = "US"
             state_conf,   state_method   = 1.0, "zip_derived"
             country_conf, country_method = 1.0, "zip_derived"
-        elif not s_zip.strip():
+            if not s_zip.strip() and zip_c:
+                zip_conf, zip_method = 1.0, "zip_derived"
+        elif _no_zip:
             # No ZIP provided — infer state/country from city name
             city_state, city_country = infer_state_from_city(city_c, country_c)
             if city_state and not state_c:
-                state_c   = city_state
+                state_c     = city_state
                 state_conf, state_method = 0.80, "city_derived"
             if city_country and not country_c:
-                country_c = city_country
+                country_c   = city_country
                 country_conf, country_method = 0.80, "city_derived"
+
+            # Nominatim fallback — only if AI didn't already fill in a ZIP
+            if not zip_c.strip() and any(x.strip() for x in [addr1_c, city_c, state_c, country_c]):
+                _zip_sig  = f"zip|{addr1_c}|{city_c}|{state_c}|{country_c}"
+                _zip_hash = _hashlib.md5(_zip_sig.encode()).hexdigest()
+                if "_zip_cache" not in st.session_state:
+                    st.session_state["_zip_cache"] = {}
+                _zip_cache = st.session_state["_zip_cache"]
+                if _zip_hash not in _zip_cache:
+                    with st.spinner("Looking up ZIP / postal code via OpenStreetMap…"):
+                        try:
+                            _zip_cache[_zip_hash] = lookup_postal_from_address(
+                                addr1_c, city_c, state_c, country_c
+                            )
+                        except Exception:
+                            _zip_cache[_zip_hash] = ""
+                looked_up_zip = _zip_cache.get(_zip_hash, "")
+                if looked_up_zip:
+                    zip_c      = correct_postal_code(looked_up_zip)
+                    zip_conf   = 0.82
+                    zip_method = "nominatim"
+                    # Re-derive state from new ZIP if it's a US ZIP
+                    _zdstate = infer_us_state_from_zip(zip_c)
+                    if _zdstate:
+                        state_c       = _zdstate
+                        country_c     = "US"
+                        state_conf,   state_method   = 1.0, "zip_derived"
+                        country_conf, country_method = 1.0, "zip_derived"
 
         # ── 4. Confidence badge helper ────────────────────────────────────────
         def _badge(conf, method=""):
@@ -573,6 +613,14 @@ with tab_single:
                 return ('<span style="background:#fdf4ff;color:#7c3aed;border:1px solid #e9d5ff;'
                         'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
                         '🏙 City</span>')
+            if method == "ai_inferred":
+                return ('<span style="background:#faf5ff;color:#7c3aed;border:1px solid #e9d5ff;'
+                        'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
+                        '✨ AI</span>')
+            if method == "nominatim":
+                return ('<span style="background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;'
+                        'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
+                        '🗺 OSM</span>')
             pct = f"{conf:.0%}"
             if conf >= 0.85:
                 return (f'<span style="background:#dcfce7;color:#15803d;border:1px solid #86efac;'
@@ -592,7 +640,7 @@ with tab_single:
             ("Addr 2",  s_addr2.strip(),   addr2_c,   scores["address2"]["confidence"], scores["address2"]["method"]),
             ("City",    s_city.strip(),    city_c,    scores["city"]["confidence"],      scores["city"]["method"]),
             ("State",   s_state.strip(),   state_c,   state_conf,                       state_method),
-            ("ZIP",     s_zip.strip(),     zip_c,     scores["postal"]["confidence"],    scores["postal"]["method"]),
+            ("ZIP",     s_zip.strip(),     zip_c,     zip_conf,                         zip_method),
             ("Country", s_country.strip(), country_c, country_conf,                     country_method),
         ]
 

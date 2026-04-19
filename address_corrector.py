@@ -1596,15 +1596,31 @@ def score_single_address(addr1: str, addr2: str, city: str, state: str, country:
 # AI ENHANCEMENT  (OpenAI)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def ai_enhance_address(addr1: str, addr2: str, city: str, state: str, country: str, postal: str, api_key: str) -> dict:
+def ai_enhance_address(addr1: str, addr2: str, city: str, state: str, country: str, postal: str, api_key: str, infer_postal: bool = False) -> dict:
     """
     Use OpenAI GPT-4o-mini to correct the address.
+    When infer_postal=True the AI is explicitly asked to determine the postal/ZIP code.
     Returns {"address", "address2", "city", "state", "country", "postal", "note"}.
     """
     import json
     import openai
 
     client = openai.OpenAI(api_key=api_key)
+
+    if infer_postal:
+        postal_rule = (
+            "- postal_code: The postal/ZIP code is MISSING. "
+            "Determine the correct postal/ZIP code for this address from the street, city, state, and country. "
+            "Always return a real, correctly formatted postal code — this field must not be empty.\n"
+        )
+        infer_note = (
+            "IMPORTANT: postal_code is blank — you MUST look it up and fill it in. "
+            "For all other fields: do not change correct names, only fix misspellings.\n\n"
+        )
+    else:
+        postal_rule = "- postal_code: correctly formatted for the country\n"
+        infer_note  = "IMPORTANT: Do not invent or guess — if a city/street name looks correct, keep it exactly as-is.\n\n"
+
     prompt = (
         "You are an address spelling and standardisation expert. "
         "Your primary job is to correct any misspellings so every field contains the exact, real name.\n"
@@ -1615,9 +1631,9 @@ def ai_enhance_address(addr1: str, addr2: str, city: str, state: str, country: s
         "- city: correct real-world spelling, Title Case (e.g. 'Fort Mill', 'Los Angeles', 'New York City')\n"
         "- state: 2-letter abbreviation (e.g. SC, CA, TX)\n"
         "- country: ISO 3166-1 alpha-2 code (e.g. US, GB, DE)\n"
-        "- postal_code: correctly formatted for the country\n"
-        "- note: ≤15-word plain-English summary of spelling/format corrections (empty string if nothing changed)\n"
-        "IMPORTANT: Do not invent or guess — if a city/street name looks correct, keep it exactly as-is.\n\n"
+        + postal_rule +
+        "- note: ≤15-word plain-English summary of corrections (include 'added ZIP' if postal was inferred)\n"
+        + infer_note +
         f"Street 1 : {addr1 or '(blank)'}\n"
         f"Street 2 : {addr2 or '(blank)'}\n"
         f"City     : {city or '(blank)'}\n"
@@ -1711,6 +1727,50 @@ def validate_address_nominatim(addr1: str, city: str, state: str, country: str, 
     return {"valid": False, "display_name": "", "lat": 0.0, "lon": 0.0,
             "message": f"Address not found after trying all fallback strategies. Last: {last_error}",
             "strategy": None}
+
+
+def lookup_postal_from_address(addr1: str, city: str, state: str, country: str) -> str:
+    """
+    Look up postal/ZIP code via OpenStreetMap Nominatim when none is provided.
+    Returns the postal code string, or "" if not found.
+    """
+    import requests
+    import time
+
+    def _p(*vals):
+        return [v for v in vals if v and v.strip()]
+
+    strategies = [
+        _p(addr1, city, state, country),
+        _p(addr1, city, country),
+        _p(city, state, country),
+        _p(city, country),
+    ]
+
+    seen = set()
+    for parts in strategies:
+        key = tuple(parts)
+        if not parts or key in seen:
+            continue
+        seen.add(key)
+        try:
+            r = requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": ", ".join(parts), "format": "json", "limit": 1, "addressdetails": 1},
+                headers={"User-Agent": "AddressCorrectorApp/1.0"},
+                timeout=6,
+            )
+            r.raise_for_status()
+            data = r.json()
+            if data:
+                postcode = data[0].get("address", {}).get("postcode", "")
+                if postcode:
+                    return postcode.strip()
+            time.sleep(0.3)
+        except Exception:
+            time.sleep(0.3)
+
+    return ""
 
 
 if __name__ == "__main__":
