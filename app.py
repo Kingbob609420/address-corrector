@@ -559,7 +559,7 @@ with tab_single:
 
         # ── 4. No ZIP supplied — look it up using the CORRECTED address ───────
         elif _no_zip:
-            # 4a. city → state/country seed
+            # 4a. city → state/country seed (so lookup has best possible inputs)
             city_state, city_country = infer_state_from_city(city_c, country_c)
             if city_state and not state_c:
                 state_c     = city_state
@@ -568,15 +568,25 @@ with tab_single:
                 country_c   = city_country
                 country_conf, country_method = 0.80, "city_derived"
 
-            # 4b. Nominatim — query with corrected fields
+            # Helper: validate ZIP is consistent with state for US addresses
+            def _zip_ok(postcode: str) -> bool:
+                if not postcode:
+                    return False
+                expected_state = infer_us_state_from_zip(postcode)
+                if expected_state and state_c and expected_state != state_c.upper():
+                    return False   # ZIP belongs to a different US state — reject
+                return True
+
+            # 4b. Nominatim structured lookup with corrected fields
+            #     Cache key includes "v2" to bust any stale free-text results
             if any(x.strip() for x in [addr1_c, city_c, state_c, country_c]):
-                _zip_sig  = f"zip|{addr1_c}|{city_c}|{state_c}|{country_c}"
+                _zip_sig  = f"zipv2|{addr1_c}|{city_c}|{state_c}|{country_c}"
                 _zip_hash = _hashlib.md5(_zip_sig.encode()).hexdigest()
                 if "_zip_cache" not in st.session_state:
                     st.session_state["_zip_cache"] = {}
                 _zip_cache = st.session_state["_zip_cache"]
                 if _zip_hash not in _zip_cache:
-                    with st.spinner("Looking up ZIP for corrected address via OpenStreetMap…"):
+                    with st.spinner("Looking up ZIP for corrected address…"):
                         try:
                             _zip_cache[_zip_hash] = lookup_postal_from_address(
                                 addr1_c, city_c, state_c, country_c
@@ -584,14 +594,14 @@ with tab_single:
                         except Exception:
                             _zip_cache[_zip_hash] = ""
                 _osm_zip = _zip_cache.get(_zip_hash, "")
-                if _osm_zip:
+                if _osm_zip and _zip_ok(_osm_zip):
                     zip_c      = correct_postal_code(_osm_zip)
-                    zip_conf   = 0.82
+                    zip_conf   = 0.90
                     zip_method = "nominatim"
 
-            # 4c. AI fallback with CORRECTED fields — only if Nominatim found nothing
+            # 4c. AI fallback with CORRECTED fields — only if lookup found nothing valid
             if not zip_c.strip() and _openai_key:
-                _zip_ai_sig  = f"zipai|{addr1_c}|{city_c}|{state_c}|{country_c}"
+                _zip_ai_sig  = f"zipai2|{addr1_c}|{city_c}|{state_c}|{country_c}"
                 _zip_ai_hash = _hashlib.md5(_zip_ai_sig.encode()).hexdigest()
                 if "_zip_cache" not in st.session_state:
                     st.session_state["_zip_cache"] = {}
@@ -607,12 +617,12 @@ with tab_single:
                         except Exception:
                             _zip_cache[_zip_ai_hash] = ""
                 _ai_found_zip = _zip_cache.get(_zip_ai_hash, "")
-                if _ai_found_zip:
+                if _ai_found_zip and _zip_ok(_ai_found_zip):
                     zip_c      = correct_postal_code(_ai_found_zip)
                     zip_conf   = 0.88
                     zip_method = "ai_inferred"
 
-            # 4d. Re-pin state/country from the newly found ZIP
+            # 4d. Re-pin state/country from the found ZIP (most authoritative source)
             if zip_c:
                 _zdstate = infer_us_state_from_zip(zip_c)
                 if _zdstate:

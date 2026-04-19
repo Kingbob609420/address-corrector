@@ -1731,44 +1731,103 @@ def validate_address_nominatim(addr1: str, city: str, state: str, country: str, 
 
 def lookup_postal_from_address(addr1: str, city: str, state: str, country: str) -> str:
     """
-    Look up postal/ZIP code via OpenStreetMap Nominatim when none is provided.
-    Returns the postal code string, or "" if not found.
+    Look up postal/ZIP code for an address that has no postal code.
+
+    Strategy (most → least specific, stops at first valid result):
+      1. Nominatim structured query  street + city + state + country
+      2. Nominatim structured query  city + state + country
+      3. Zippopotam.us               city + state  (US only, no API key needed)
+
+    All Nominatim calls use separate field params (street=, city=, state=,
+    country=) rather than the free-text q= parameter — this is significantly
+    more accurate and avoids false-positive matches.
+
+    The result is validated: for US addresses the returned ZIP's state prefix
+    must match the supplied state; mismatches are discarded.
     """
     import requests
     import time
+    import urllib.parse
 
-    def _p(*vals):
-        return [v for v in vals if v and v.strip()]
+    HEADERS = {"User-Agent": "AddressCorrectorApp/1.0"}
+    TIMEOUT = 7
 
-    strategies = [
-        _p(addr1, city, state, country),
-        _p(addr1, city, country),
-        _p(city, state, country),
-        _p(city, country),
-    ]
-
-    seen = set()
-    for parts in strategies:
-        key = tuple(parts)
-        if not parts or key in seen:
-            continue
-        seen.add(key)
+    # ── helper: call Nominatim structured search ──────────────────────────────
+    def _nominatim(street="", city_v="", state_v="", country_v="") -> str:
+        params: dict = {"format": "json", "limit": 3, "addressdetails": 1}
+        if street:    params["street"]  = street
+        if city_v:    params["city"]    = city_v
+        if state_v:   params["state"]   = state_v
+        if country_v: params["country"] = country_v
+        if len(params) == 3:          # nothing useful besides format/limit/addressdetails
+            return ""
         try:
             r = requests.get(
                 "https://nominatim.openstreetmap.org/search",
-                params={"q": ", ".join(parts), "format": "json", "limit": 1, "addressdetails": 1},
-                headers={"User-Agent": "AddressCorrectorApp/1.0"},
-                timeout=6,
+                params=params, headers=HEADERS, timeout=TIMEOUT,
             )
             r.raise_for_status()
-            data = r.json()
-            if data:
-                postcode = data[0].get("address", {}).get("postcode", "")
-                if postcode:
-                    return postcode.strip()
-            time.sleep(0.3)
+            results = r.json()
+            for hit in results:
+                pc = hit.get("address", {}).get("postcode", "").strip()
+                if pc:
+                    return pc
         except Exception:
-            time.sleep(0.3)
+            pass
+        time.sleep(0.4)
+        return ""
+
+    # ── US state code set for validation ─────────────────────────────────────
+    _US_STATES_SET = set(US_STATES.values())  # 2-letter codes
+
+    def _valid_for_state(postcode: str, state_code: str) -> bool:
+        """Return False if the ZIP's prefix maps to a different US state."""
+        if not state_code or state_code.upper() not in _US_STATES_SET:
+            return True   # can't validate non-US or unknown state — accept
+        expected = infer_us_state_from_zip(postcode)
+        if not expected:
+            return True   # ZIP prefix not in our table — accept
+        return expected == state_code.upper()
+
+    a1  = addr1.strip()
+    ct  = city.strip()
+    st  = state.strip()
+    co  = country.strip()
+
+    # ── Strategy 1: street + city + state + country ───────────────────────────
+    if a1 and ct:
+        pc = _nominatim(street=a1, city_v=ct, state_v=st, country_v=co)
+        if pc and _valid_for_state(pc, st):
+            return pc
+
+    # ── Strategy 2: city + state + country (no street) ───────────────────────
+    if ct:
+        pc = _nominatim(city_v=ct, state_v=st, country_v=co)
+        if pc and _valid_for_state(pc, st):
+            return pc
+
+    # ── Strategy 3: Zippopotam.us — US city + state only ────────────────────
+    # Free public API, no key required, highly reliable for US city/state pairs.
+    _is_us = (
+        co.upper() in ("US", "USA", "UNITED STATES", "")
+        or st.upper() in _US_STATES_SET
+    )
+    if _is_us and ct and st and st.upper() in _US_STATES_SET:
+        city_slug = urllib.parse.quote(ct.lower())
+        state_slug = st.lower()
+        try:
+            r = requests.get(
+                f"https://api.zippopotam.us/us/{state_slug}/{city_slug}",
+                headers=HEADERS, timeout=5,
+            )
+            if r.status_code == 200:
+                places = r.json().get("places", [])
+                if places:
+                    pc = places[0].get("post code", "").strip()
+                    if pc and _valid_for_state(pc, st):
+                        return pc
+        except Exception:
+            pass
 
     return ""
 
