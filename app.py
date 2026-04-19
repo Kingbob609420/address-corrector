@@ -549,6 +549,8 @@ with tab_single:
                 if _ai_zip:
                     zip_c = _ai_zip
 
+        _geo: dict = {}   # lat/lon/display_name from whichever source found the ZIP
+
         # ── 3. Authoritative ZIP → state when ZIP was already supplied ────────
         zip_derived_state = infer_us_state_from_zip(s_zip.strip()) or infer_us_state_from_zip(zip_c)
         if zip_derived_state:
@@ -568,19 +570,18 @@ with tab_single:
                 country_c   = city_country
                 country_conf, country_method = 0.80, "city_derived"
 
-            # Helper: validate ZIP is consistent with state for US addresses
+            # Helper: reject ZIP that belongs to a different US state
             def _zip_ok(postcode: str) -> bool:
                 if not postcode:
                     return False
-                expected_state = infer_us_state_from_zip(postcode)
-                if expected_state and state_c and expected_state != state_c.upper():
-                    return False   # ZIP belongs to a different US state — reject
+                expected = infer_us_state_from_zip(postcode)
+                if expected and state_c and expected != state_c.upper():
+                    return False
                 return True
 
-            # 4b. Nominatim structured lookup with corrected fields
-            #     Cache key includes "v2" to bust any stale free-text results
+            # 4b. Nominatim + Zippopotam.us structured lookup with corrected fields
             if any(x.strip() for x in [addr1_c, city_c, state_c, country_c]):
-                _zip_sig  = f"zipv2|{addr1_c}|{city_c}|{state_c}|{country_c}"
+                _zip_sig  = f"zipv3|{addr1_c}|{city_c}|{state_c}|{country_c}"
                 _zip_hash = _hashlib.md5(_zip_sig.encode()).hexdigest()
                 if "_zip_cache" not in st.session_state:
                     st.session_state["_zip_cache"] = {}
@@ -592,16 +593,18 @@ with tab_single:
                                 addr1_c, city_c, state_c, country_c
                             )
                         except Exception:
-                            _zip_cache[_zip_hash] = ""
-                _osm_zip = _zip_cache.get(_zip_hash, "")
+                            _zip_cache[_zip_hash] = {}
+                _lookup = _zip_cache.get(_zip_hash, {})
+                _osm_zip = _lookup.get("postal", "") if isinstance(_lookup, dict) else ""
                 if _osm_zip and _zip_ok(_osm_zip):
                     zip_c      = correct_postal_code(_osm_zip)
                     zip_conf   = 0.90
                     zip_method = "nominatim"
+                    _geo       = _lookup   # save coords for map reuse
 
-            # 4c. AI fallback with CORRECTED fields — only if lookup found nothing valid
+            # 4c. AI fallback — only if lookup found nothing valid
             if not zip_c.strip() and _openai_key:
-                _zip_ai_sig  = f"zipai2|{addr1_c}|{city_c}|{state_c}|{country_c}"
+                _zip_ai_sig  = f"zipai3|{addr1_c}|{city_c}|{state_c}|{country_c}"
                 _zip_ai_hash = _hashlib.md5(_zip_ai_sig.encode()).hexdigest()
                 if "_zip_cache" not in st.session_state:
                     st.session_state["_zip_cache"] = {}
@@ -617,12 +620,12 @@ with tab_single:
                         except Exception:
                             _zip_cache[_zip_ai_hash] = ""
                 _ai_found_zip = _zip_cache.get(_zip_ai_hash, "")
-                if _ai_found_zip and _zip_ok(_ai_found_zip):
+                if isinstance(_ai_found_zip, str) and _ai_found_zip and _zip_ok(_ai_found_zip):
                     zip_c      = correct_postal_code(_ai_found_zip)
                     zip_conf   = 0.88
                     zip_method = "ai_inferred"
 
-            # 4d. Re-pin state/country from the found ZIP (most authoritative source)
+            # 4d. Re-pin state/country from the found ZIP
             if zip_c:
                 _zdstate = infer_us_state_from_zip(zip_c)
                 if _zdstate:
@@ -769,8 +772,23 @@ with tab_single:
             validate_clicked = st.button("🗺 Validate on Map", use_container_width=True, key="validate_btn")
 
         if validate_clicked:
-            with st.spinner("Validating corrected address on OpenStreetMap…"):
-                vr = validate_address_nominatim(addr1_c, city_c, state_c, country_c, zip_c)
+            # Reuse coordinates from the ZIP lookup when available — guarantees
+            # the map shows the exact same location that produced the ZIP code.
+            if _geo.get("lat") and _geo.get("lon"):
+                vr = {
+                    "valid":            True,
+                    "display_name":     _geo.get("display_name", ""),
+                    "lat":              _geo["lat"],
+                    "lon":              _geo["lon"],
+                    "message":          f"Found ({_geo.get('source', 'lookup')})",
+                    "strategy":         _geo.get("source", "lookup"),
+                    "matched_postcode": zip_c,
+                    "matched_city":     city_c,
+                    "matched_state":    state_c,
+                }
+            else:
+                with st.spinner("Validating corrected address on OpenStreetMap…"):
+                    vr = validate_address_nominatim(addr1_c, city_c, state_c, country_c, zip_c)
             if vr["valid"]:
                 maps_url = f"https://www.openstreetmap.org/?mlat={vr['lat']}&mlon={vr['lon']}&zoom=16"
 
