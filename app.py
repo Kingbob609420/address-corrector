@@ -499,6 +499,13 @@ with tab_single:
 
     if any(x.strip() for x in [s_addr1, s_addr2, s_city, s_state, s_country, s_zip]):
 
+        # Signature for this raw input — used to key the validation override
+        _addr_sig = _hashlib.md5(
+            f"{s_addr1}|{s_addr2}|{s_city}|{s_state}|{s_country}|{s_zip}".encode()
+        ).hexdigest()
+        # Validated fields from a previous "Validate on Map" click (if any)
+        _val = st.session_state.get(f"_val_{_addr_sig}", {})
+
         # ── 1. Rule-based corrections ─────────────────────────────────────────
         scores    = score_single_address(s_addr1, s_addr2, s_city, s_state, s_country, s_zip)
         addr1_c   = scores["address"]["corrected"]  or s_addr1.strip()
@@ -549,8 +556,6 @@ with tab_single:
                 if _ai_zip:
                     zip_c = _ai_zip
 
-        _geo: dict = {}   # lat/lon/display_name from whichever source found the ZIP
-
         # ── 3. Authoritative ZIP → state when ZIP was already supplied ────────
         zip_derived_state = infer_us_state_from_zip(s_zip.strip()) or infer_us_state_from_zip(zip_c)
         if zip_derived_state:
@@ -559,9 +564,9 @@ with tab_single:
             state_conf,   state_method   = 1.0, "zip_derived"
             country_conf, country_method = 1.0, "zip_derived"
 
-        # ── 4. No ZIP supplied — look it up using the CORRECTED address ───────
-        elif _no_zip:
-            # 4a. city → state/country seed (so lookup has best possible inputs)
+        # ── 4. No ZIP supplied — ask ChatGPT with corrected fields ────────────
+        elif _no_zip and _openai_key:
+            # 4a. seed state/country from city so AI has best inputs
             city_state, city_country = infer_state_from_city(city_c, country_c)
             if city_state and not state_c:
                 state_c     = city_state
@@ -570,63 +575,28 @@ with tab_single:
                 country_c   = city_country
                 country_conf, country_method = 0.80, "city_derived"
 
-            # Helper: reject ZIP that belongs to a different US state
-            def _zip_ok(postcode: str) -> bool:
-                if not postcode:
-                    return False
-                expected = infer_us_state_from_zip(postcode)
-                if expected and state_c and expected != state_c.upper():
-                    return False
-                return True
-
-            # 4b. Nominatim + Zippopotam.us structured lookup with corrected fields
-            if any(x.strip() for x in [addr1_c, city_c, state_c, country_c]):
-                _zip_sig  = f"zipv3|{addr1_c}|{city_c}|{state_c}|{country_c}"
-                _zip_hash = _hashlib.md5(_zip_sig.encode()).hexdigest()
-                if "_zip_cache" not in st.session_state:
-                    st.session_state["_zip_cache"] = {}
-                _zip_cache = st.session_state["_zip_cache"]
-                if _zip_hash not in _zip_cache:
-                    with st.spinner("Looking up ZIP for corrected address…"):
-                        try:
-                            _zip_cache[_zip_hash] = lookup_postal_from_address(
-                                addr1_c, city_c, state_c, country_c
-                            )
-                        except Exception:
-                            _zip_cache[_zip_hash] = {}
-                _lookup = _zip_cache.get(_zip_hash, {})
-                _osm_zip = _lookup.get("postal", "") if isinstance(_lookup, dict) else ""
-                if _osm_zip and _zip_ok(_osm_zip):
-                    zip_c      = correct_postal_code(_osm_zip)
-                    zip_conf   = 0.90
-                    zip_method = "nominatim"
-                    _geo       = _lookup   # save coords for map reuse
-
-            # 4c. AI fallback — only if lookup found nothing valid
-            if not zip_c.strip() and _openai_key:
-                _zip_ai_sig  = f"zipai3|{addr1_c}|{city_c}|{state_c}|{country_c}"
-                _zip_ai_hash = _hashlib.md5(_zip_ai_sig.encode()).hexdigest()
-                if "_zip_cache" not in st.session_state:
-                    st.session_state["_zip_cache"] = {}
-                _zip_cache = st.session_state["_zip_cache"]
-                if _zip_ai_hash not in _zip_cache:
-                    with st.spinner("Asking AI to find ZIP for corrected address…"):
-                        try:
-                            _zr = ai_enhance_address(
-                                addr1_c, addr2_c, city_c, state_c, country_c, "",
-                                _openai_key, infer_postal=True,
-                            )
-                            _zip_cache[_zip_ai_hash] = _ai_val(_zr.get("postal"), "")
-                        except Exception:
-                            _zip_cache[_zip_ai_hash] = ""
-                _ai_found_zip = _zip_cache.get(_zip_ai_hash, "")
-                if isinstance(_ai_found_zip, str) and _ai_found_zip and _zip_ok(_ai_found_zip):
-                    zip_c      = correct_postal_code(_ai_found_zip)
-                    zip_conf   = 0.88
-                    zip_method = "ai_inferred"
-
-            # 4d. Re-pin state/country from the found ZIP
-            if zip_c:
+            # 4b. ChatGPT ZIP lookup using the CORRECTED address fields
+            _zip_ai_sig  = f"zipai4|{addr1_c}|{city_c}|{state_c}|{country_c}"
+            _zip_ai_hash = _hashlib.md5(_zip_ai_sig.encode()).hexdigest()
+            if "_zip_cache" not in st.session_state:
+                st.session_state["_zip_cache"] = {}
+            _zip_cache = st.session_state["_zip_cache"]
+            if _zip_ai_hash not in _zip_cache:
+                with st.spinner("Asking ChatGPT for ZIP code…"):
+                    try:
+                        _zr = ai_enhance_address(
+                            addr1_c, addr2_c, city_c, state_c, country_c, "",
+                            _openai_key, infer_postal=True,
+                        )
+                        _zip_cache[_zip_ai_hash] = _ai_val(_zr.get("postal"), "")
+                    except Exception:
+                        _zip_cache[_zip_ai_hash] = ""
+            _ai_zip = _zip_cache.get(_zip_ai_hash, "")
+            if _ai_zip:
+                zip_c      = correct_postal_code(_ai_zip)
+                zip_conf   = 0.88
+                zip_method = "ai_inferred"
+                # Re-pin state from ZIP if US
                 _zdstate = infer_us_state_from_zip(zip_c)
                 if _zdstate:
                     state_c       = _zdstate
@@ -634,6 +604,17 @@ with tab_single:
                     state_conf,   state_method   = 1.0, "zip_derived"
                     country_conf, country_method = 1.0, "zip_derived"
                     zip_conf,     zip_method     = 1.0, "zip_derived"
+
+        # ── 5. Apply map-validation override (from a previous validate click) ─
+        # When the user validates on the map, Nominatim's confirmed fields
+        # replace the corrected fields so the output matches the map exactly.
+        if _val.get("valid"):
+            if _val.get("matched_city"):     city_c    = _val["matched_city"]
+            if _val.get("matched_state"):    state_c   = _val["matched_state"]
+            if _val.get("matched_postcode"): zip_c     = _val["matched_postcode"]
+            zip_conf,     zip_method     = 1.0, "map_validated"
+            state_conf,   state_method   = 1.0, "map_validated"
+            country_conf, country_method = 1.0, "map_validated"
 
         # ── 5. Confidence badge helper ────────────────────────────────────────
         def _badge(conf, method=""):
@@ -653,6 +634,10 @@ with tab_single:
                 return ('<span style="background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;'
                         'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
                         '🗺 OSM</span>')
+            if method == "map_validated":
+                return ('<span style="background:#f0fdf4;color:#15803d;border:1px solid #86efac;'
+                        'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
+                        '✅ Map</span>')
             pct = f"{conf:.0%}"
             if conf >= 0.85:
                 return (f'<span style="background:#dcfce7;color:#15803d;border:1px solid #86efac;'
@@ -772,79 +757,32 @@ with tab_single:
             validate_clicked = st.button("🗺 Validate on Map", use_container_width=True, key="validate_btn")
 
         if validate_clicked:
-            # Reuse coordinates from the ZIP lookup when available — guarantees
-            # the map shows the exact same location that produced the ZIP code.
-            if _geo.get("lat") and _geo.get("lon"):
-                vr = {
-                    "valid":            True,
-                    "display_name":     _geo.get("display_name", ""),
-                    "lat":              _geo["lat"],
-                    "lon":              _geo["lon"],
-                    "message":          f"Found ({_geo.get('source', 'lookup')})",
-                    "strategy":         _geo.get("source", "lookup"),
-                    "matched_postcode": zip_c,
-                    "matched_city":     city_c,
-                    "matched_state":    state_c,
-                }
-            else:
-                with st.spinner("Validating corrected address on OpenStreetMap…"):
-                    vr = validate_address_nominatim(addr1_c, city_c, state_c, country_c, zip_c)
-            if vr["valid"]:
-                maps_url = f"https://www.openstreetmap.org/?mlat={vr['lat']}&mlon={vr['lon']}&zoom=16"
+            with st.spinner("Validating address on OpenStreetMap…"):
+                vr = validate_address_nominatim(addr1_c, city_c, state_c, country_c, zip_c)
+            st.session_state[f"_val_{_addr_sig}"] = vr
+            st.rerun()
 
-                # Build a comparison: corrected vs matched
-                def _cmp_row(label, corrected, matched):
-                    match = matched.strip() if matched else ""
-                    corr  = corrected.strip() if corrected else ""
-                    if not corr and not match:
-                        return ""
-                    if match and corr and match.upper() != corr.upper():
-                        indicator = '<span style="color:#ca8a04;font-size:.7rem;margin-left:.3rem">⚠ differs</span>'
-                    else:
-                        indicator = '<span style="color:#15803d;font-size:.7rem;margin-left:.3rem">✓</span>' if match else ""
-                    return (
-                        f'<tr>'
-                        f'<td style="color:#a1a1aa;padding:.18rem .6rem .18rem 0;white-space:nowrap">{label}</td>'
-                        f'<td style="padding:.18rem .6rem .18rem 0;font-weight:600">{corr or "—"}</td>'
-                        f'<td style="color:#52525b;padding:.18rem 0">{match or "—"}{indicator}</td>'
-                        f'</tr>'
-                    )
-
-                rows = (
-                    _cmp_row("City",    city_c,    vr.get("matched_city", ""))
-                    + _cmp_row("State",   state_c,   vr.get("matched_state", ""))
-                    + _cmp_row("ZIP",     zip_c,     vr.get("matched_postcode", ""))
-                )
-                table = (
-                    f'<table style="font-size:.78rem;border-collapse:collapse;margin-top:.6rem;width:100%">'
-                    f'<thead><tr>'
-                    f'<th style="color:#a1a1aa;font-weight:600;text-align:left;padding:.18rem .6rem .18rem 0"></th>'
-                    f'<th style="color:#a1a1aa;font-weight:600;text-align:left;padding:.18rem .6rem .18rem 0">Corrected</th>'
-                    f'<th style="color:#a1a1aa;font-weight:600;text-align:left;padding:.18rem 0">OSM matched</th>'
-                    f'</tr></thead><tbody>{rows}</tbody></table>'
-                ) if rows else ""
-
-                st.markdown(
-                    f'<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;'
-                    f'padding:.9rem 1.1rem;font-size:.84rem">'
-                    f'<div style="display:flex;justify-content:space-between;align-items:center">'
-                    f'<span style="color:#15803d;font-weight:700">✓ Address verified on map</span>'
-                    f'<a href="{maps_url}" target="_blank" style="color:#15803d;font-size:.78rem;'
-                    f'text-decoration:underline">View on map ↗</a></div>'
-                    f'{table}'
-                    f'<div style="color:#71717a;font-size:.72rem;margin-top:.5rem;'
-                    f'border-top:1px solid rgba(0,0,0,.06);padding-top:.4rem">'
-                    f'{vr["display_name"]}</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    f'<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;'
-                    f'padding:.85rem 1.1rem;font-size:.84rem">'
-                    f'<span style="color:#dc2626;font-weight:700">⚠ {vr["message"]}</span></div>',
-                    unsafe_allow_html=True,
-                )
+        # Show map result card whenever a stored validation result exists
+        if _val.get("valid"):
+            maps_url = f"https://www.openstreetmap.org/?mlat={_val['lat']}&mlon={_val['lon']}&zoom=16"
+            st.markdown(
+                f'<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;'
+                f'padding:.9rem 1.1rem;font-size:.84rem;margin-top:.6rem">'
+                f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem">'
+                f'<span style="color:#15803d;font-weight:700">✅ Validated — output updated to map result</span>'
+                f'<a href="{maps_url}" target="_blank" style="color:#15803d;font-size:.78rem;'
+                f'text-decoration:underline">View on map ↗</a></div>'
+                f'<div style="color:#374151;font-size:.82rem;line-height:1.7">{_val["display_name"]}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        elif _val.get("valid") is False:
+            st.markdown(
+                f'<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;'
+                f'padding:.85rem 1.1rem;font-size:.84rem;margin-top:.6rem">'
+                f'<span style="color:#dc2626;font-weight:700">⚠ {_val.get("message","Not found")}</span></div>',
+                unsafe_allow_html=True,
+            )
 
     else:
         st.markdown("""
