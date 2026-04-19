@@ -1733,16 +1733,23 @@ def validate_address_nominatim(addr1: str, city: str, state: str, country: str, 
                 "lon":              float(hit.get("lon", 0)),
                 "message":          f"Found ({label})",
                 "strategy":         label,
+                # All raw address components — caller normalises these
+                "matched_house":    addr_detail.get("house_number", ""),
+                "matched_road":     addr_detail.get("road", "") or addr_detail.get("street", ""),
                 "matched_postcode": addr_detail.get("postcode", ""),
-                "matched_city":     addr_detail.get("city") or addr_detail.get("town") or addr_detail.get("village") or "",
+                "matched_city":     (addr_detail.get("city") or addr_detail.get("town")
+                                     or addr_detail.get("village") or addr_detail.get("municipality") or ""),
                 "matched_state":    addr_detail.get("state", ""),
+                "matched_country_code": addr_detail.get("country_code", "").upper(),
             }
         last_error = f'Not found via "{label}"'
 
     return {
         "valid": False, "display_name": "", "lat": 0.0, "lon": 0.0,
         "message": f"Address not found. Last: {last_error}",
-        "strategy": None, "matched_postcode": "", "matched_city": "", "matched_state": "",
+        "strategy": None,
+        "matched_house": "", "matched_road": "", "matched_postcode": "",
+        "matched_city": "", "matched_state": "", "matched_country_code": "",
     }
 
 

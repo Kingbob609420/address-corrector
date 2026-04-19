@@ -11,6 +11,7 @@ from address_corrector import (
     score_single_address, ai_enhance_address, validate_address_nominatim,
     infer_us_state_from_zip, infer_state_from_city,
     lookup_postal_from_address, correct_postal_code,
+    correct_state, correct_address_line, correct_city, correct_country,
 )
 
 
@@ -606,12 +607,33 @@ with tab_single:
                     zip_conf,     zip_method     = 1.0, "zip_derived"
 
         # ── 5. Apply map-validation override (from a previous validate click) ─
-        # When the user validates on the map, Nominatim's confirmed fields
-        # replace the corrected fields so the output matches the map exactly.
+        # Rebuild every field from Nominatim's raw address components,
+        # passing them through the same correctors so formats match.
         if _val.get("valid"):
-            if _val.get("matched_city"):     city_c    = _val["matched_city"]
-            if _val.get("matched_state"):    state_c   = _val["matched_state"]
-            if _val.get("matched_postcode"): zip_c     = _val["matched_postcode"]
+            _m_house   = _val.get("matched_house", "").strip()
+            _m_road    = _val.get("matched_road", "").strip()
+            _m_city    = _val.get("matched_city", "").strip()
+            _m_state   = _val.get("matched_state", "").strip()
+            _m_post    = _val.get("matched_postcode", "").strip()
+            _m_country = _val.get("matched_country_code", "").strip()
+
+            # addr1: house + road → normalised USPS style
+            if _m_house or _m_road:
+                _raw_addr1 = f"{_m_house} {_m_road}".strip()
+                addr1_c = correct_address_line(_raw_addr1)
+            # city → Title Case
+            if _m_city:
+                city_c = correct_city(_m_city) or _m_city.title()
+            # state: Nominatim returns full name ("South Carolina") → abbreviation
+            if _m_state:
+                state_c = correct_state(_m_state)
+            # postal
+            if _m_post:
+                zip_c = correct_postal_code(_m_post)
+            # country: Nominatim returns ISO alpha-2 (lowercase) → uppercase
+            if _m_country:
+                country_c = _m_country.upper()
+
             zip_conf,     zip_method     = 1.0, "map_validated"
             state_conf,   state_method   = 1.0, "map_validated"
             country_conf, country_method = 1.0, "map_validated"
