@@ -1139,6 +1139,37 @@ def lookup_city_from_zip(postal: str) -> dict:
     return {}
 
 
+def lookup_zip_from_city_state(city: str, state: str) -> dict:
+    """
+    Given a US city and 2-letter state, return a ZIP code and canonical city
+    name using Zippopotam.us.  Returns {"zip": "...", "city": "...", "state": "XX"}
+    or {} on failure.
+    """
+    import requests
+    if not city or not state or len(state.strip()) != 2:
+        return {}
+    city_slug  = city.strip().lower().replace(" ", "%20")
+    state_slug = state.strip().lower()
+    try:
+        r = requests.get(
+            f"https://api.zippopotam.us/us/{state_slug}/{city_slug}",
+            headers={"User-Agent": "address-corrector/1.0"},
+            timeout=5,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            places = data.get("places", [])
+            if places:
+                return {
+                    "zip":   places[0].get("post code", ""),
+                    "city":  places[0].get("place name", "").title(),
+                    "state": data.get("state abbreviation", state.upper()),
+                }
+    except Exception:
+        pass
+    return {}
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # CORRECTION DISPATCH
 # ──────────────────────────────────────────────────────────────────────────────

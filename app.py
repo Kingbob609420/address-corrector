@@ -13,7 +13,7 @@ from address_corrector import (
     infer_us_state_from_zip, infer_state_from_city,
     lookup_postal_from_address, correct_postal_code,
     correct_state, correct_address_line, correct_city, correct_country,
-    lookup_city_from_zip,
+    lookup_city_from_zip, lookup_zip_from_city_state,
 )
 
 
@@ -619,6 +619,22 @@ with tab_single:
                     country_conf, country_method = 1.0, "zip_derived"
                     zip_conf,     zip_method     = 1.0, "zip_derived"
 
+        # ── 4c. No ZIP yet but have city+state — look up ZIP via Zippopotam ─────
+        # Runs when no ZIP was supplied AND ChatGPT/garbled mode didn't infer one.
+        # This gives us a ZIP so step 4b can then canonicalise city+state.
+        if not zip_c and city_c and state_c and len(state_c.strip()) == 2 and not _val.get("valid"):
+            if "_czs_cache" not in st.session_state:
+                st.session_state["_czs_cache"] = {}
+            _czs_key = f"{city_c.lower()}|{state_c.lower()}"
+            _czs     = st.session_state["_czs_cache"]
+            if _czs_key not in _czs:
+                _czs[_czs_key] = lookup_zip_from_city_state(city_c, state_c)
+            _czs_data = _czs.get(_czs_key, {})
+            if _czs_data.get("zip"):
+                zip_c      = _czs_data["zip"]
+                zip_conf   = 0.90
+                zip_method = "city_state_lookup"
+
         # ── 4b. Authoritative ZIP → city+state cross-check (US only) ────────────
         # After all AI/rule corrections, if we have a US ZIP, use Zippopotam.us
         # as the ground truth for city and state so they never mismatch the ZIP.
@@ -683,6 +699,10 @@ with tab_single:
                 return ('<span style="background:#faf5ff;color:#7c3aed;border:1px solid #e9d5ff;'
                         'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
                         '✨ AI</span>')
+            if method == "city_state_lookup":
+                return ('<span style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;'
+                        'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
+                        '🏙 City→ZIP</span>')
             if method == "nominatim":
                 return ('<span style="background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;'
                         'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
