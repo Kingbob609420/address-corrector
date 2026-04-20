@@ -13,6 +13,7 @@ from address_corrector import (
     infer_us_state_from_zip, infer_state_from_city,
     lookup_postal_from_address, correct_postal_code,
     correct_state, correct_address_line, correct_city, correct_country,
+    lookup_city_from_zip,
 )
 
 
@@ -617,6 +618,24 @@ with tab_single:
                     state_conf,   state_method   = 1.0, "zip_derived"
                     country_conf, country_method = 1.0, "zip_derived"
                     zip_conf,     zip_method     = 1.0, "zip_derived"
+
+        # ── 4b. Authoritative ZIP → city+state cross-check (US only) ────────────
+        # After all AI/rule corrections, if we have a US ZIP, use Zippopotam.us
+        # as the ground truth for city and state so they never mismatch the ZIP.
+        if zip_c and not _val.get("valid"):
+            if "_zip_city_cache" not in st.session_state:
+                st.session_state["_zip_city_cache"] = {}
+            _zcc = st.session_state["_zip_city_cache"]
+            if zip_c not in _zcc:
+                _zcc[zip_c] = lookup_city_from_zip(zip_c)
+            _zc_data = _zcc.get(zip_c, {})
+            if _zc_data.get("city"):
+                city_c  = _zc_data["city"]
+            if _zc_data.get("state"):
+                state_c   = _zc_data["state"]
+                country_c = "US"
+                state_conf,   state_method   = 1.0, "zip_derived"
+                country_conf, country_method = 1.0, "zip_derived"
 
         # ── 5. Apply map-validation override (from a previous validate click) ─
         # Rebuild every field from Nominatim's raw address components,

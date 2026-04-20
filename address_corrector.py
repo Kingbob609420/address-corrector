@@ -1108,6 +1108,37 @@ def infer_us_state_from_zip(postal: str) -> str:
     return _ZIP_PREFIX_TO_STATE.get(digits[:3], "")
 
 
+def lookup_city_from_zip(postal: str) -> dict:
+    """
+    Given a US ZIP code, return the canonical city and state using Zippopotam.us.
+    Returns {"city": "...", "state": "XX"} or {} on failure/non-US ZIP.
+    """
+    import requests
+    digits = (postal or "").strip().replace("-", "")[:5]
+    if len(digits) != 5 or not digits.isdigit():
+        return {}
+    # Only attempt for known US ZIP prefixes
+    if not _ZIP_PREFIX_TO_STATE.get(digits[:3]):
+        return {}
+    try:
+        r = requests.get(
+            f"https://api.zippopotam.us/us/{digits}",
+            headers={"User-Agent": "address-corrector/1.0"},
+            timeout=5,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            places = data.get("places", [])
+            if places:
+                return {
+                    "city":  places[0].get("place name", "").title(),
+                    "state": places[0].get("state abbreviation", ""),
+                }
+    except Exception:
+        pass
+    return {}
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # CORRECTION DISPATCH
 # ──────────────────────────────────────────────────────────────────────────────
