@@ -1596,10 +1596,11 @@ def score_single_address(addr1: str, addr2: str, city: str, state: str, country:
 # AI ENHANCEMENT  (OpenAI)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def ai_enhance_address(addr1: str, addr2: str, city: str, state: str, country: str, postal: str, api_key: str, infer_postal: bool = False) -> dict:
+def ai_enhance_address(addr1: str, addr2: str, city: str, state: str, country: str, postal: str, api_key: str, infer_postal: bool = False, garbled: bool = False) -> dict:
     """
     Use OpenAI GPT-4o-mini to correct the address.
     When infer_postal=True the AI is explicitly asked to determine the postal/ZIP code.
+    When garbled=True the AI is asked to interpret ambiguous/garbled input as the most likely real address.
     Returns {"address", "address2", "city", "state", "country", "postal", "note"}.
     """
     import json
@@ -1607,7 +1608,17 @@ def ai_enhance_address(addr1: str, addr2: str, city: str, state: str, country: s
 
     client = openai.OpenAI(api_key=api_key)
 
-    if infer_postal:
+    if garbled:
+        postal_rule = (
+            "- postal_code: Determine the correct postal/ZIP code for this address. "
+            "Always return a real, correctly formatted postal code — this field must not be empty.\n"
+        )
+        infer_note = (
+            "IMPORTANT: The input may be garbled, abbreviated, or ambiguous (e.g. only digits, or a partial address). "
+            "Use your knowledge to determine the most likely real-world street address, city, state, and postal code. "
+            "Fill in ALL fields with your best determination — do not leave any blank.\n\n"
+        )
+    elif infer_postal:
         postal_rule = (
             "- postal_code: The postal/ZIP code is MISSING. "
             "Determine the correct postal/ZIP code for this address from the street, city, state, and country. "

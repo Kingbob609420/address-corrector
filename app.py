@@ -1,4 +1,5 @@
 import io
+import re
 import importlib
 import pandas as pd
 import streamlit as st
@@ -521,11 +522,18 @@ with tab_single:
         _no_zip = not s_zip.strip()
 
         # ── 2. AI: correct spelling/format of the address (no ZIP inference yet) ─
+        # Garbled = address field looks like a digit string or otherwise non-address
+        _is_garbled = bool(
+            s_addr1.strip() and
+            re.fullmatch(r"[\d\s\-]+", s_addr1.strip()) and
+            not re.match(r"^\d+\s+\w", s_addr1.strip())
+        )
         ai_result = None
         if _openai_key:
             if "_ai_cache" not in st.session_state:
                 st.session_state["_ai_cache"] = {}
-            _sig  = f"{s_addr1}|{s_addr2}|{s_city}|{s_state}|{s_country}|{s_zip}"
+            _garbled_tag = "g1" if _is_garbled else "n"
+            _sig  = f"{_garbled_tag}|{s_addr1}|{s_addr2}|{s_city}|{s_state}|{s_country}|{s_zip}"
             _hash = _hashlib.md5(_sig.encode()).hexdigest()
             cache = st.session_state["_ai_cache"]
             if _hash not in cache:
@@ -533,7 +541,9 @@ with tab_single:
                     try:
                         cache[_hash] = ai_enhance_address(
                             s_addr1, s_addr2, s_city, s_state, s_country, s_zip,
-                            _openai_key, infer_postal=False,
+                            _openai_key,
+                            infer_postal=_is_garbled,
+                            garbled=_is_garbled,
                         )
                     except Exception as _exc:
                         cache[_hash] = {"error": str(_exc)}
@@ -552,10 +562,12 @@ with tab_single:
             city_c    = _ai_val(ai_result.get("city"),     city_c)
             state_c   = _ai_val(ai_result.get("state"),    state_c)
             country_c = _ai_val(ai_result.get("country"),  country_c)
-            if not _no_zip:   # only reformat postal when user supplied one
+            if not _no_zip or _is_garbled:   # reformat postal when user supplied one, or when garbled interpretation includes ZIP
                 _ai_zip = _ai_val(ai_result.get("postal"), "")
                 if _ai_zip:
-                    zip_c = _ai_zip
+                    zip_c      = correct_postal_code(_ai_zip)
+                    zip_conf   = 0.88
+                    zip_method = "ai_inferred"
 
         # ── 3. Authoritative ZIP → state when ZIP was already supplied ────────
         zip_derived_state = infer_us_state_from_zip(s_zip.strip()) or infer_us_state_from_zip(zip_c)
@@ -566,7 +578,7 @@ with tab_single:
             country_conf, country_method = 1.0, "zip_derived"
 
         # ── 4. No ZIP supplied — ask ChatGPT with corrected fields ────────────
-        elif _no_zip and _openai_key:
+        elif _no_zip and not _is_garbled and _openai_key:
             # 4a. seed state/country from city so AI has best inputs
             city_state, city_country = infer_state_from_city(city_c, country_c)
             if city_state and not state_c:
