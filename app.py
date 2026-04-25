@@ -9,11 +9,6 @@ import address_corrector as _ac
 importlib.reload(_ac)
 from address_corrector import (
     CORRECTORS, DISPLAY_LABELS, _detect_columns, _write_excel, apply_autofix,
-    score_single_address, ai_enhance_address, validate_address_nominatim,
-    infer_us_state_from_zip, infer_state_from_city,
-    lookup_postal_from_address, correct_postal_code,
-    correct_state, correct_address_line, correct_city, correct_country,
-    lookup_city_from_zip, lookup_zip_from_city_state,
 )
 
 
@@ -437,11 +432,6 @@ textarea::placeholder { color: #d4d4d8 !important; }
 """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# API KEY — read from Streamlit secrets (set in app dashboard or secrets.toml)
-# ══════════════════════════════════════════════════════════════════════════════
-_openai_key = st.secrets.get("OPENAI_API_KEY", "")
-
-# ══════════════════════════════════════════════════════════════════════════════
 # NAV
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("""
@@ -476,658 +466,259 @@ st.markdown("""
 <div class="tool-wrap" id="load">
     <div class="tool-label">Step 1</div>
     <div class="tool-heading">Correct your addresses</div>
-    <div class="tool-sub">Fix a single address instantly, or process hundreds at once.</div>
+    <div class="tool-sub">Paste from Excel or upload a file to process hundreds of addresses at once.</div>
 </div>
 """, unsafe_allow_html=True)
 
-tab_single, tab_bulk = st.tabs(["Single Address", "Bulk Upload"])
+df_raw = None
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — SINGLE ADDRESS
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_single:
-    import hashlib as _hashlib
+col_paste, col_or, col_upload = st.columns([10, 1, 10])
 
-    st.markdown('<div style="max-width:700px;margin:0 auto;padding:1.5rem 2rem 4rem">', unsafe_allow_html=True)
+with col_paste:
+    st.markdown("""
+    <div class="panel">
+        <div class="panel-icon">📋</div>
+        <div class="panel-title">Paste from Excel</div>
+        <div class="panel-desc">
+            Copy a block of cells with the header row and paste below.<br>
+            Tab, comma &amp; semicolon delimiters auto-detected.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    pasted = st.text_area(
+        "paste", height=200, label_visibility="collapsed",
+        placeholder=(
+            "Address Line 1\tCity\tState\tCountry\tPostal Code\n"
+            "123 main st\tnew york\tnew york\tUSA\t10001\n"
+            "10 Downing St\tlondon\t\tuk\tSW1A2AA"
+        ),
+    )
+    if pasted.strip():
+        sample = pasted.split("\n")[0]
+        tabs, commas, semis = sample.count("\t"), sample.count(","), sample.count(";")
+        delim = "\t" if tabs >= commas and tabs >= semis else (";" if semis > commas else ",")
+        try:
+            df_raw = pd.read_csv(io.StringIO(pasted), sep=delim, dtype=str, on_bad_lines="skip").fillna("")
+            st.markdown(f'<div class="toast-ok">✓ &nbsp;{len(df_raw):,} rows ready</div>', unsafe_allow_html=True)
+        except Exception as e:
+            st.error(str(e))
 
-    c1, c2 = st.columns(2)
-    with c1:
-        s_addr1   = st.text_input("Street Address",    placeholder="123 Main St",  key="s_addr1")
-        s_addr2   = st.text_input("Address Line 2",    placeholder="APT 4B",       key="s_addr2")
-        s_city    = st.text_input("City",              placeholder="Fort Mill",     key="s_city")
-    with c2:
-        s_state   = st.text_input("State / Province",  placeholder="NC",           key="s_state")
-        s_country = st.text_input("Country",           placeholder="United States", key="s_country")
-        s_zip     = st.text_input("ZIP / Postal Code", placeholder="29708",        key="s_zip")
+with col_or:
+    st.markdown("""
+    <div class="or-col" style="height:340px">
+        <div class="or-line-seg"></div>
+        <div class="or-circle">OR</div>
+        <div class="or-line-seg"></div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    if any(x.strip() for x in [s_addr1, s_addr2, s_city, s_state, s_country, s_zip]):
-
-        # Signature for this raw input — used to key the validation override
-        _addr_sig = _hashlib.md5(
-            f"{s_addr1}|{s_addr2}|{s_city}|{s_state}|{s_country}|{s_zip}".encode()
-        ).hexdigest()
-        # Validated fields from a previous "Validate on Map" click (if any)
-        _val = st.session_state.get(f"_val_{_addr_sig}", {})
-
-        # ── 1. Rule-based corrections ─────────────────────────────────────────
-        scores    = score_single_address(s_addr1, s_addr2, s_city, s_state, s_country, s_zip)
-        addr1_c   = scores["address"]["corrected"]  or s_addr1.strip()
-        addr2_c   = scores["address2"]["corrected"] or s_addr2.strip()
-        city_c    = scores["city"]["corrected"]     or s_city.strip()
-        zip_c     = scores["postal"]["corrected"]   or s_zip.strip()
-        state_c   = scores["state"]["corrected"]    or s_state.strip()
-        country_c = scores["country"]["corrected"]  or s_country.strip()
-        state_conf,   state_method   = scores["state"]["confidence"],   scores["state"]["method"]
-        country_conf, country_method = scores["country"]["confidence"], scores["country"]["method"]
-        zip_conf,     zip_method     = scores["postal"]["confidence"],  scores["postal"]["method"]
-        city_conf,    city_method    = scores["city"]["confidence"],    scores["city"]["method"]
-        _no_zip = not s_zip.strip()
-
-        # ── 2. AI: correct spelling/format of the address (no ZIP inference yet) ─
-        # Garbled = address field looks like a digit string or otherwise non-address
-        _is_garbled = bool(
-            s_addr1.strip() and
-            re.fullmatch(r"[\d\s\-]+", s_addr1.strip()) and
-            not re.match(r"^\d+\s+\w", s_addr1.strip())
-        )
-        ai_result = None
-        if _openai_key:
-            if "_ai_cache" not in st.session_state:
-                st.session_state["_ai_cache"] = {}
-            _garbled_tag = "g1" if _is_garbled else "n"
-            _sig  = f"{_garbled_tag}|{s_addr1}|{s_addr2}|{s_city}|{s_state}|{s_country}|{s_zip}"
-            _hash = _hashlib.md5(_sig.encode()).hexdigest()
-            cache = st.session_state["_ai_cache"]
-            if _hash not in cache:
-                with st.spinner("Correcting address…"):
-                    try:
-                        cache[_hash] = ai_enhance_address(
-                            s_addr1, s_addr2, s_city, s_state, s_country, s_zip,
-                            _openai_key,
-                            infer_postal=_is_garbled,
-                            garbled=_is_garbled,
-                        )
-                    except Exception as _exc:
-                        cache[_hash] = {"error": str(_exc)}
-                if len(cache) >= 30:
-                    for _k in list(cache.keys())[:10]:
-                        del cache[_k]
-            ai_result = cache[_hash]
-
-        def _ai_val(v, fallback):
-            clean = str(v or "").strip()
-            return clean if clean and clean.lower() not in {"(blank)", "blank", "none", "nan", ""} else fallback
-
-        if ai_result and "error" not in ai_result:
-            addr1_c   = _ai_val(ai_result.get("address"),  addr1_c)
-            addr2_c   = _ai_val(ai_result.get("address2"), addr2_c)
-            city_c    = _ai_val(ai_result.get("city"),     city_c)
-            state_c   = _ai_val(ai_result.get("state"),    state_c)
-            country_c = _ai_val(ai_result.get("country"),  country_c)
-            if not _no_zip or _is_garbled:   # reformat postal when user supplied one, or when garbled interpretation includes ZIP
-                _ai_zip = _ai_val(ai_result.get("postal"), "")
-                if _ai_zip:
-                    zip_c      = correct_postal_code(_ai_zip)
-                    zip_conf   = 0.88
-                    zip_method = "ai_inferred"
-
-        # ── 3. Authoritative ZIP → state when ZIP was already supplied ────────
-        zip_derived_state = infer_us_state_from_zip(s_zip.strip()) or infer_us_state_from_zip(zip_c)
-        if zip_derived_state:
-            state_c       = zip_derived_state
-            country_c     = "US"
-            state_conf,   state_method   = 1.0, "zip_derived"
-            country_conf, country_method = 1.0, "zip_derived"
-
-        # ── 4. No ZIP supplied — ask ChatGPT with corrected fields ────────────
-        elif _no_zip and not _is_garbled and _openai_key:
-            # 4a. seed state/country from city so AI has best inputs
-            city_state, city_country = infer_state_from_city(city_c, country_c)
-            if city_state and not state_c:
-                state_c     = city_state
-                state_conf, state_method = 0.80, "city_derived"
-            if city_country and not country_c:
-                country_c   = city_country
-                country_conf, country_method = 0.80, "city_derived"
-
-            # 4b. ChatGPT ZIP lookup using the CORRECTED address fields
-            _zip_ai_sig  = f"zipai4|{addr1_c}|{city_c}|{state_c}|{country_c}"
-            _zip_ai_hash = _hashlib.md5(_zip_ai_sig.encode()).hexdigest()
-            if "_zip_cache" not in st.session_state:
-                st.session_state["_zip_cache"] = {}
-            _zip_cache = st.session_state["_zip_cache"]
-            if _zip_ai_hash not in _zip_cache:
-                with st.spinner("Asking ChatGPT for ZIP code…"):
-                    try:
-                        _zr = ai_enhance_address(
-                            addr1_c, addr2_c, city_c, state_c, country_c, "",
-                            _openai_key, infer_postal=True,
-                        )
-                        _zip_cache[_zip_ai_hash] = _ai_val(_zr.get("postal"), "")
-                    except Exception:
-                        _zip_cache[_zip_ai_hash] = ""
-            _ai_zip = _zip_cache.get(_zip_ai_hash, "")
-            if _ai_zip:
-                zip_c      = correct_postal_code(_ai_zip)
-                zip_conf   = 0.88
-                zip_method = "ai_inferred"
-                # Re-pin state from ZIP if US
-                _zdstate = infer_us_state_from_zip(zip_c)
-                if _zdstate:
-                    state_c       = _zdstate
-                    country_c     = "US"
-                    state_conf,   state_method   = 1.0, "zip_derived"
-                    country_conf, country_method = 1.0, "zip_derived"
-                    zip_conf,     zip_method     = 1.0, "zip_derived"
-
-        # ── 4c. No ZIP yet but have city+state — look up ZIP via Zippopotam ─────
-        # Runs when no ZIP was supplied AND ChatGPT/garbled mode didn't infer one.
-        # This gives us a ZIP so step 4b can then canonicalise city+state.
-        if not zip_c and city_c and state_c and len(state_c.strip()) == 2 and not _val.get("valid"):
-            if "_czs_cache" not in st.session_state:
-                st.session_state["_czs_cache"] = {}
-            _czs_key = f"{city_c.lower()}|{state_c.lower()}"
-            _czs     = st.session_state["_czs_cache"]
-            if _czs_key not in _czs:
-                _czs[_czs_key] = lookup_zip_from_city_state(city_c, state_c)
-            _czs_data = _czs.get(_czs_key, {})
-            if _czs_data.get("zip"):
-                zip_c      = _czs_data["zip"]
-                zip_conf   = 0.90
-                zip_method = "city_state_lookup"
-
-        # ── 4b. Authoritative ZIP → city+state cross-check (US only) ────────────
-        # After all AI/rule corrections, if we have a US ZIP, use Zippopotam.us
-        # as the ground truth for city and state so they never mismatch the ZIP.
-        if zip_c and not _val.get("valid"):
-            if "_zip_city_cache" not in st.session_state:
-                st.session_state["_zip_city_cache"] = {}
-            _zcc = st.session_state["_zip_city_cache"]
-            if zip_c not in _zcc:
-                _zcc[zip_c] = lookup_city_from_zip(zip_c)
-            _zc_data = _zcc.get(zip_c, {})
-            if _zc_data.get("city"):
-                city_c  = _zc_data["city"]
-            if _zc_data.get("state"):
-                state_c   = _zc_data["state"]
-                country_c = "US"
-                state_conf,   state_method   = 1.0, "zip_derived"
-                country_conf, country_method = 1.0, "zip_derived"
-
-        # ── 5. Apply map-validation override (from a previous validate click) ─
-        # Rebuild every field from Nominatim's raw address components,
-        # passing them through the same correctors so formats match.
-        if _val.get("valid"):
-            _m_house   = _val.get("matched_house", "").strip()
-            _m_road    = _val.get("matched_road", "").strip()
-            _m_city    = _val.get("matched_city", "").strip()
-            _m_state   = _val.get("matched_state", "").strip()
-            _m_post    = _val.get("matched_postcode", "").strip()
-            _m_country = _val.get("matched_country_code", "").strip()
-
-            # addr1: house + road → normalised USPS style
-            if _m_house or _m_road:
-                _raw_addr1 = f"{_m_house} {_m_road}".strip()
-                addr1_c = correct_address_line(_raw_addr1)
-            # city → prefer Nominatim's value; fall back to ZIP lookup for US
-            if _m_city:
-                city_c    = correct_city(_m_city) or _m_city.title()
-                city_conf, city_method = 1.0, "map_validated"
-            elif _m_post:
-                # Nominatim didn't return a city (e.g. small towns stored as suburb)
-                # — derive canonical city name from the postcode instead
-                _zc_data = lookup_city_from_zip(_m_post)
-                if _zc_data.get("city"):
-                    city_c    = _zc_data["city"]
-                    city_conf, city_method = 1.0, "map_validated"
-            # state: Nominatim returns full name ("South Carolina") → abbreviation
-            if _m_state:
-                state_c = correct_state(_m_state)
-            # postal
-            if _m_post:
-                zip_c = correct_postal_code(_m_post)
-            # country: Nominatim returns ISO alpha-2 (lowercase) → uppercase
-            if _m_country:
-                country_c = _m_country.upper()
-
-            zip_conf,     zip_method     = 1.0, "map_validated"
-            state_conf,   state_method   = 1.0, "map_validated"
-            country_conf, country_method = 1.0, "map_validated"
-
-        # ── 5. Confidence badge helper ────────────────────────────────────────
-        def _badge(conf, method=""):
-            if method == "zip_derived":
-                return ('<span style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;'
-                        'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
-                        '📌 ZIP</span>')
-            if method == "city_derived":
-                return ('<span style="background:#fdf4ff;color:#7c3aed;border:1px solid #e9d5ff;'
-                        'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
-                        '🏙 City</span>')
-            if method == "ai_inferred":
-                return ('<span style="background:#faf5ff;color:#7c3aed;border:1px solid #e9d5ff;'
-                        'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
-                        '✨ AI</span>')
-            if method == "city_state_lookup":
-                return ('<span style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;'
-                        'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
-                        '🏙 City→ZIP</span>')
-            if method == "nominatim":
-                return ('<span style="background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;'
-                        'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
-                        '🗺 OSM</span>')
-            if method == "map_validated":
-                return ('<span style="background:#f0fdf4;color:#15803d;border:1px solid #86efac;'
-                        'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
-                        '✅ Map</span>')
-            pct = f"{conf:.0%}"
-            if conf >= 0.85:
-                return (f'<span style="background:#dcfce7;color:#15803d;border:1px solid #86efac;'
-                        f'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
-                        f'● {pct}</span>')
-            elif conf >= 0.65:
-                return (f'<span style="background:#fefce8;color:#a16207;border:1px solid #fde068;'
-                        f'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
-                        f'● {pct}</span>')
-            return (f'<span style="background:#fef2f2;color:#dc2626;border:1px solid #fecaca;'
-                    f'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700">'
-                    f'● {pct}</span>')
-
-        # ── 6. Build field rows ───────────────────────────────────────────────
-        field_rows = [
-            ("Address", s_addr1.strip(),   addr1_c,   scores["address"]["confidence"],  scores["address"]["method"]),
-            ("Addr 2",  s_addr2.strip(),   addr2_c,   scores["address2"]["confidence"], scores["address2"]["method"]),
-            ("City",    s_city.strip(),    city_c,    city_conf,                         city_method),
-            ("State",   s_state.strip(),   state_c,   state_conf,                       state_method),
-            ("ZIP",     s_zip.strip(),     zip_c,     zip_conf,                         zip_method),
-            ("Country", s_country.strip(), country_c, country_conf,                     country_method),
-        ]
-
-        conf_html = changes_html = ""
-        for label, orig, corr, conf, method in field_rows:
-            display      = corr or orig
-            is_empty     = not display
-            display_html = (f'<span style="color:#d4d4d8">—</span>' if is_empty
-                            else f'<span style="color:#111118">{display}</span>')
-            badge_html   = _badge(conf, method) if display else ""
-            conf_html += (
-                f'<div style="display:flex;gap:.5rem;align-items:center;'
-                f'font-size:.82rem;margin-bottom:.35rem">'
-                f'<span style="color:#a1a1aa;min-width:72px">{label}</span>'
-                f'<span style="flex:1">{display_html}</span>'
-                f'{badge_html}'
-                f'</div>'
+with col_upload:
+    st.markdown("""
+    <div class="panel">
+        <div class="panel-icon">📁</div>
+        <div class="panel-title">Upload a file</div>
+        <div class="panel-desc">
+            Drop in a CSV or Excel file.<br>
+            All column formats handled automatically.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    uploaded = st.file_uploader("upload", type=["csv","xlsx","xls"], label_visibility="collapsed")
+    if uploaded:
+        try:
+            df_raw = (
+                pd.read_csv(uploaded, dtype=str) if uploaded.name.endswith(".csv")
+                else pd.read_excel(uploaded, dtype=str)
+            ).fillna("")
+            st.markdown(
+                f'<div class="toast-ok">✓ &nbsp;{uploaded.name} &nbsp;·&nbsp; {len(df_raw):,} rows</div>',
+                unsafe_allow_html=True,
             )
-            if orig and orig.upper() != corr.upper():
-                changes_html += (
-                    f'<div style="display:flex;gap:.5rem;align-items:center;'
-                    f'font-size:.82rem;margin-bottom:.4rem">'
-                    f'<span style="color:#a1a1aa;min-width:72px">{label}</span>'
-                    f'<span style="color:#a16207;background:#fefce8;border:1px solid #fde068;'
-                    f'border-radius:6px;padding:.15rem .5rem">{orig}</span>'
-                    f'<span style="color:#a1a1aa">→</span>'
-                    f'<span style="color:#15803d;background:#f0fdf4;border:1px solid #86efac;'
-                    f'border-radius:6px;padding:.15rem .5rem;font-weight:600">{corr}</span>'
-                    f'</div>'
-                )
-            elif not orig and corr:
-                changes_html += (
-                    f'<div style="display:flex;gap:.5rem;align-items:center;'
-                    f'font-size:.82rem;margin-bottom:.4rem">'
-                    f'<span style="color:#a1a1aa;min-width:72px">{label}</span>'
-                    f'<span style="color:#15803d;background:#f0fdf4;border:1px solid #86efac;'
-                    f'border-radius:6px;padding:.15rem .5rem;font-weight:600">'
-                    f'✦ {corr} <span style="font-weight:400;opacity:.7">(auto-filled)</span>'
-                    f'</span></div>'
-                )
+        except Exception as e:
+            st.error(str(e))
 
-        # ── 7. Render result card (all 6 fields always shown) ─────────────────
-        def _fval(v): return v if v.strip() else '<span style="color:#d4d4d8">—</span>'
-        addr_block = (
-            f'<div style="display:grid;grid-template-columns:auto 1fr;gap:.25rem .9rem;'
-            f'font-size:.9rem;line-height:1.75">'
-            f'<span style="color:#a1a1aa">Address</span><span>{_fval(addr1_c)}</span>'
-            + (f'<span style="color:#a1a1aa">Addr 2</span><span>{_fval(addr2_c)}</span>' if addr2_c.strip() else '')
-            + f'<span style="color:#a1a1aa">City</span><span>{_fval(city_c)}</span>'
-            f'<span style="color:#a1a1aa">State</span><span>{_fval(state_c)}</span>'
-            f'<span style="color:#a1a1aa">ZIP</span><span>{_fval(zip_c)}</span>'
-            f'<span style="color:#a1a1aa">Country</span><span>{_fval(country_c)}</span>'
-            f'</div>'
-        )
+# ── RESULTS ────────────────────────────────────────────────────────────
+if df_raw is None or len(df_raw) == 0:
+    st.markdown("""
+    <div style="max-width:1060px;margin:2rem auto 6rem;padding:0 2rem">
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:18px;
+                text-align:center;padding:4.5rem 2rem;box-shadow:0 2px 16px rgba(0,0,0,.05)">
+        <div style="font-size:2.8rem;margin-bottom:1rem">📍</div>
+        <div style="font-size:1.15rem;font-weight:800;color:#111118;
+                    letter-spacing:-.5px;margin-bottom:.5rem">
+            Results will appear here
+        </div>
+        <p style="color:#a1a1aa;font-size:.85rem;max-width:380px;
+                  margin:0 auto 2rem;line-height:1.75">
+            Paste your addresses or upload a file above to see corrections,
+            metrics, and download your cleaned data.
+        </p>
+        <div style="display:flex;justify-content:center;gap:.55rem;flex-wrap:wrap">
+            <span style="background:#f5f4f0;border:1px solid rgba(0,0,0,.07);border-radius:100px;
+                         padding:.35rem 1rem;font-size:.74rem;color:#6c47ff;font-weight:600">
+                ✓ Auto-detects column names
+            </span>
+            <span style="background:#f5f4f0;border:1px solid rgba(0,0,0,.07);border-radius:100px;
+                         padding:.35rem 1rem;font-size:.74rem;color:#6c47ff;font-weight:600">
+                ✓ 249 countries
+            </span>
+            <span style="background:#f5f4f0;border:1px solid rgba(0,0,0,.07);border-radius:100px;
+                         padding:.35rem 1rem;font-size:.74rem;color:#6c47ff;font-weight:600">
+                ✓ Catches misspellings
+            </span>
+            <span style="background:#f5f4f0;border:1px solid rgba(0,0,0,.07);border-radius:100px;
+                         padding:.35rem 1rem;font-size:.74rem;color:#6c47ff;font-weight:600">
+                ✓ Excel &amp; CSV export
+            </span>
+        </div>
+    </div>
+    </div>
+    """, unsafe_allow_html=True)
+else:
+    col_map  = _detect_columns(df_raw.columns)
+    detected = {f: c for f, c in col_map.items() if c is not None}
 
-        ai_badge = ('<span style="background:#faf5ff;color:#7c3aed;border:1px solid #e9d5ff;'
-                    'border-radius:100px;padding:.12rem .55rem;font-size:.67rem;font-weight:700;'
-                    'margin-left:.4rem">✨ AI</span>' if (ai_result and "error" not in ai_result) else "")
+    if not detected:
+        st.markdown("""
+        <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:12px;
+                    padding:1.1rem 1.4rem;margin-top:1.5rem">
+            <b style="color:#dc2626">⚠ No address columns detected</b><br>
+            <span style="color:#a1a1aa;font-size:.82rem">
+            Ensure your data has a header row with names like Address, City, State, Country, Postal Code.
+            </span>
+        </div>""", unsafe_allow_html=True)
+    else:
+        # Corrections
+        result = df_raw.copy()
+        corrected_col_map = {}
+        for field, orig_col in col_map.items():
+            if orig_col is None: continue
+            if field not in CORRECTORS: continue
+            lbl = f"Corrected {DISPLAY_LABELS[field]}"
+            result[lbl] = df_raw[orig_col].apply(CORRECTORS[field])
+            corrected_col_map[lbl] = lbl
 
-        changes_section = (
-            f'<div style="margin-top:1.2rem;padding-top:1.2rem;border-top:1px solid rgba(0,0,0,.06)">'
-            f'<div style="font-size:.68rem;font-weight:700;letter-spacing:.7px;text-transform:uppercase;'
-            f'color:#a1a1aa;margin-bottom:.6rem">Changes &amp; auto-filled fields</div>'
-            f'{changes_html}</div>'
-        ) if changes_html else ""
+        apply_autofix(result, col_map)
 
-        if ai_result and "error" in ai_result:
-            st.warning(f"AI correction failed: {ai_result['error']}")
+        # Stats
+        per_field, total_changed = {}, 0
+        for field, orig_col in col_map.items():
+            if orig_col is None: continue
+            if field not in DISPLAY_LABELS: continue
+            lbl = f"Corrected {DISPLAY_LABELS[field]}"
+            if lbl not in result.columns: continue
+            n = (result[orig_col].astype(str).str.strip() != result[lbl].astype(str).str.strip()).sum()
+            per_field[DISPLAY_LABELS[field]] = int(n)
+            total_changed += n
+        total_rows, fields_found = len(df_raw), len(detected)
 
-        ai_note_html = ""
-        if ai_result and "error" not in ai_result and ai_result.get("note"):
-            ai_note_html = (f'<div style="margin-top:.8rem;padding-top:.8rem;border-top:1px solid rgba(0,0,0,.06);'
-                            f'color:#7c3aed;font-size:.8rem">✨ {ai_result["note"]}</div>')
-
-        st.markdown(f"""
-        <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:16px;
-                    padding:1.8rem 2rem;margin-top:1.5rem;box-shadow:0 2px 16px rgba(0,0,0,.05)">
-          <div style="font-size:.68rem;font-weight:700;letter-spacing:.7px;
-                      text-transform:uppercase;color:#a1a1aa;margin-bottom:.9rem">
-            Corrected address{ai_badge}
-          </div>
-          <div style="background:#f5f4f0;border-radius:10px;padding:1rem 1.2rem;margin-bottom:1.4rem">
-            {addr_block}
-          </div>
-          <div style="font-size:.68rem;font-weight:700;letter-spacing:.7px;
-                      text-transform:uppercase;color:#a1a1aa;margin-bottom:.6rem">Field confidence</div>
-          {conf_html}
-          {changes_section}
-          {ai_note_html}
+        st.markdown("""
+        <div class="tool-wrap" style="padding-bottom:1.4rem">
+            <div class="tool-label">Step 2</div>
+            <div class="tool-heading">Your corrected addresses</div>
+            <div class="tool-sub">Review what changed, then download.</div>
         </div>
         """, unsafe_allow_html=True)
 
-        # ── 7. Validate on Map button ─────────────────────────────────────────
+        st.markdown('<div style="max-width:1060px;margin:0 auto;padding:0 2rem 6rem">', unsafe_allow_html=True)
+        st.markdown('<div class="results-card">', unsafe_allow_html=True)
+
+        # Metrics
+        mc = st.columns(4)
+        for col, (val, lbl) in zip(mc, [
+            (f"{total_rows:,}", "Rows Processed"),
+            (f"{fields_found}", "Fields Detected"),
+            (f"{total_changed:,}", "Cells Corrected"),
+            (f"{total_changed/max(total_rows*fields_found,1):.0%}", "Correction Rate"),
+        ]):
+            col.markdown(f'<div class="mtile"><div class="mtile-val">{val}</div><div class="mtile-lbl">{lbl}</div></div>',
+                         unsafe_allow_html=True)
+
         st.markdown("<div style='height:.8rem'></div>", unsafe_allow_html=True)
-        vbtn_col, _ = st.columns([2, 7])
-        with vbtn_col:
-            validate_clicked = st.button("🗺 Validate on Map", use_container_width=True, key="validate_btn")
 
-        if validate_clicked:
-            with st.spinner("Validating address on OpenStreetMap…"):
-                vr = validate_address_nominatim(addr1_c, city_c, state_c, country_c, zip_c)
-            st.session_state[f"_val_{_addr_sig}"] = vr
-            st.rerun()
+        # Column badges
+        bdg = '<div class="badge-row">'
+        for field, label in DISPLAY_LABELS.items():
+            orig = col_map.get(field)
+            if orig:
+                bdg += f'<span class="bdg bdg-ok">✓ {label} <span class="bdg-src">← {orig}</span></span>'
+            else:
+                bdg += f'<span class="bdg bdg-no">— {label}</span>'
+        bdg += '</div>'
+        st.markdown(bdg, unsafe_allow_html=True)
 
-        # Show map result card whenever a stored validation result exists
-        if _val.get("valid"):
-            maps_url = f"https://www.openstreetmap.org/?mlat={_val['lat']}&mlon={_val['lon']}&zoom=16"
-            st.markdown(
-                f'<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;'
-                f'padding:.9rem 1.1rem;font-size:.84rem;margin-top:.6rem">'
-                f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem">'
-                f'<span style="color:#15803d;font-weight:700">✅ Validated — output updated to map result</span>'
-                f'<a href="{maps_url}" target="_blank" style="color:#15803d;font-size:.78rem;'
-                f'text-decoration:underline">View on map ↗</a></div>'
-                f'<div style="color:#374151;font-size:.82rem;line-height:1.7">{_val["display_name"]}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-        elif _val.get("valid") is False:
-            st.markdown(
-                f'<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;'
-                f'padding:.85rem 1.1rem;font-size:.84rem;margin-top:.6rem">'
-                f'<span style="color:#dc2626;font-weight:700">⚠ {_val.get("message","Not found")}</span></div>',
-                unsafe_allow_html=True,
-            )
+        # Bar chart
+        if any(v > 0 for v in per_field.values()):
+            with st.expander("Breakdown by field"):
+                st.bar_chart(pd.DataFrame.from_dict(per_field, orient="index", columns=["Corrections"]),
+                             color="#6c47ff")
 
-    else:
-        st.markdown("""
-        <div style="text-align:center;color:#a1a1aa;font-size:.88rem;padding:3rem 0">
-            Enter an address above to see corrections instantly.
-        </div>
-        """, unsafe_allow_html=True)
+        # View toggle + table
+        vl, vr = st.columns([4, 3])
+        with vl:
+            st.markdown('<p style="font-size:.72rem;font-weight:700;letter-spacing:.7px;'
+                        'text-transform:uppercase;color:#a1a1aa;margin-bottom:.3rem">View</p>',
+                        unsafe_allow_html=True)
+        with vr:
+            view_mode = st.radio("v", ["Side by side", "Corrected only", "Changes only"],
+                                 horizontal=True, label_visibility="collapsed")
 
-    st.markdown('</div>', unsafe_allow_html=True)
+        orig_addr = [c for c in df_raw.columns if c in col_map.values()]
+        corr_cols = list(corrected_col_map.keys())
+        other     = [c for c in df_raw.columns if c not in orig_addr]
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — BULK
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_bulk:
-    df_raw = None
-
-    col_paste, col_or, col_upload = st.columns([10, 1, 10])
-
-    with col_paste:
-        st.markdown("""
-        <div class="panel">
-            <div class="panel-icon">📋</div>
-            <div class="panel-title">Paste from Excel</div>
-            <div class="panel-desc">
-                Copy a block of cells with the header row and paste below.<br>
-                Tab, comma &amp; semicolon delimiters auto-detected.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        pasted = st.text_area(
-            "paste", height=200, label_visibility="collapsed",
-            placeholder=(
-                "Address Line 1\tCity\tState\tCountry\tPostal Code\n"
-                "123 main st\tnew york\tnew york\tUSA\t10001\n"
-                "10 Downing St\tlondon\t\tuk\tSW1A2AA"
-            ),
-        )
-        if pasted.strip():
-            sample = pasted.split("\n")[0]
-            tabs, commas, semis = sample.count("\t"), sample.count(","), sample.count(";")
-            delim = "\t" if tabs >= commas and tabs >= semis else (";" if semis > commas else ",")
-            try:
-                df_raw = pd.read_csv(io.StringIO(pasted), sep=delim, dtype=str, on_bad_lines="skip").fillna("")
-                st.markdown(f'<div class="toast-ok">✓ &nbsp;{len(df_raw):,} rows ready</div>', unsafe_allow_html=True)
-            except Exception as e:
-                st.error(str(e))
-
-    with col_or:
-        st.markdown("""
-        <div class="or-col" style="height:340px">
-            <div class="or-line-seg"></div>
-            <div class="or-circle">OR</div>
-            <div class="or-line-seg"></div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col_upload:
-        st.markdown("""
-        <div class="panel">
-            <div class="panel-icon">📁</div>
-            <div class="panel-title">Upload a file</div>
-            <div class="panel-desc">
-                Drop in a CSV or Excel file.<br>
-                All column formats handled automatically.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        uploaded = st.file_uploader("upload", type=["csv","xlsx","xls"], label_visibility="collapsed")
-        if uploaded:
-            try:
-                df_raw = (
-                    pd.read_csv(uploaded, dtype=str) if uploaded.name.endswith(".csv")
-                    else pd.read_excel(uploaded, dtype=str)
-                ).fillna("")
-                st.markdown(
-                    f'<div class="toast-ok">✓ &nbsp;{uploaded.name} &nbsp;·&nbsp; {len(df_raw):,} rows</div>',
-                    unsafe_allow_html=True,
-                )
-            except Exception as e:
-                st.error(str(e))
-
-    # ── RESULTS ────────────────────────────────────────────────────────────
-    if df_raw is None or len(df_raw) == 0:
-        st.markdown("""
-        <div style="max-width:1060px;margin:2rem auto 6rem;padding:0 2rem">
-        <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:18px;
-                    text-align:center;padding:4.5rem 2rem;box-shadow:0 2px 16px rgba(0,0,0,.05)">
-            <div style="font-size:2.8rem;margin-bottom:1rem">📍</div>
-            <div style="font-size:1.15rem;font-weight:800;color:#111118;
-                        letter-spacing:-.5px;margin-bottom:.5rem">
-                Results will appear here
-            </div>
-            <p style="color:#a1a1aa;font-size:.85rem;max-width:380px;
-                      margin:0 auto 2rem;line-height:1.75">
-                Paste your addresses or upload a file above to see corrections,
-                metrics, and download your cleaned data.
-            </p>
-            <div style="display:flex;justify-content:center;gap:.55rem;flex-wrap:wrap">
-                <span style="background:#f5f4f0;border:1px solid rgba(0,0,0,.07);border-radius:100px;
-                             padding:.35rem 1rem;font-size:.74rem;color:#6c47ff;font-weight:600">
-                    ✓ Auto-detects column names
-                </span>
-                <span style="background:#f5f4f0;border:1px solid rgba(0,0,0,.07);border-radius:100px;
-                             padding:.35rem 1rem;font-size:.74rem;color:#6c47ff;font-weight:600">
-                    ✓ 249 countries
-                </span>
-                <span style="background:#f5f4f0;border:1px solid rgba(0,0,0,.07);border-radius:100px;
-                             padding:.35rem 1rem;font-size:.74rem;color:#6c47ff;font-weight:600">
-                    ✓ Catches misspellings
-                </span>
-                <span style="background:#f5f4f0;border:1px solid rgba(0,0,0,.07);border-radius:100px;
-                             padding:.35rem 1rem;font-size:.74rem;color:#6c47ff;font-weight:600">
-                    ✓ Excel &amp; CSV export
-                </span>
-            </div>
-        </div>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        col_map  = _detect_columns(df_raw.columns)
-        detected = {f: c for f, c in col_map.items() if c is not None}
-
-        if not detected:
-            st.markdown("""
-            <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:12px;
-                        padding:1.1rem 1.4rem;margin-top:1.5rem">
-                <b style="color:#dc2626">⚠ No address columns detected</b><br>
-                <span style="color:#a1a1aa;font-size:.82rem">
-                Ensure your data has a header row with names like Address, City, State, Country, Postal Code.
-                </span>
-            </div>""", unsafe_allow_html=True)
-        else:
-            # Corrections
-            result = df_raw.copy()
-            corrected_col_map = {}
+        if view_mode == "Corrected only":
+            display_df = pd.concat([df_raw[other], result[corr_cols]], axis=1)
+        elif view_mode == "Changes only":
+            mask = pd.Series(False, index=result.index)
             for field, orig_col in col_map.items():
-                if orig_col is None: continue
-                if field not in CORRECTORS: continue
-                lbl = f"Corrected {DISPLAY_LABELS[field]}"
-                result[lbl] = df_raw[orig_col].apply(CORRECTORS[field])
-                corrected_col_map[lbl] = lbl
-
-            apply_autofix(result, col_map)
-
-            # Stats
-            per_field, total_changed = {}, 0
-            for field, orig_col in col_map.items():
-                if orig_col is None: continue
-                if field not in DISPLAY_LABELS: continue
+                if orig_col is None or field not in DISPLAY_LABELS: continue
                 lbl = f"Corrected {DISPLAY_LABELS[field]}"
                 if lbl not in result.columns: continue
-                n = (result[orig_col].astype(str).str.strip() != result[lbl].astype(str).str.strip()).sum()
-                per_field[DISPLAY_LABELS[field]] = int(n)
-                total_changed += n
-            total_rows, fields_found = len(df_raw), len(detected)
+                mask |= result[orig_col].astype(str).str.strip() != result[lbl].astype(str).str.strip()
+            display_df = result[mask]
+        else:
+            display_df = result
 
-            st.markdown("""
-            <div class="tool-wrap" style="padding-bottom:1.4rem">
-                <div class="tool-label">Step 2</div>
-                <div class="tool-heading">Your corrected addresses</div>
-                <div class="tool-sub">Review what changed, then download.</div>
-            </div>
-            """, unsafe_allow_html=True)
+        def highlight_changes(df):
+            s = pd.DataFrame("", index=df.index, columns=df.columns)
+            for field, orig_col in col_map.items():
+                if field not in DISPLAY_LABELS: continue
+                lbl = f"Corrected {DISPLAY_LABELS[field]}"
+                if orig_col not in df.columns or lbl not in df.columns: continue
+                changed = df[orig_col].astype(str).str.strip() != df[lbl].astype(str).str.strip()
+                s.loc[changed, lbl]      = "background-color:#f0fdf4;color:#15803d;font-weight:600"
+                s.loc[changed, orig_col] = "background-color:#fefce8;color:#a16207"
+            return s
 
-            st.markdown('<div style="max-width:1060px;margin:0 auto;padding:0 2rem 6rem">', unsafe_allow_html=True)
-            st.markdown('<div class="results-card">', unsafe_allow_html=True)
+        st.dataframe(display_df.style.apply(highlight_changes, axis=None),
+                 use_container_width=True, height=min(44 + 36*len(display_df), 520))
 
-            # Metrics
-            mc = st.columns(4)
-            for col, (val, lbl) in zip(mc, [
-                (f"{total_rows:,}", "Rows Processed"),
-                (f"{fields_found}", "Fields Detected"),
-                (f"{total_changed:,}", "Cells Corrected"),
-                (f"{total_changed/max(total_rows*fields_found,1):.0%}", "Correction Rate"),
-            ]):
-                col.markdown(f'<div class="mtile"><div class="mtile-val">{val}</div><div class="mtile-lbl">{lbl}</div></div>',
-                             unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="legend">
+        <span><span class="ldot" style="background:#dcfce7;border:1px solid #86efac"></span>Corrected value</span>
+        <span><span class="ldot" style="background:#fef9c3;border:1px solid #fde047"></span>Original (changed)</span>
+        <span style="margin-left:auto">{len(display_df):,} of {total_rows:,} rows shown</span>
+        </div>
+        <div style="height:1.5rem"></div>
+        """, unsafe_allow_html=True)
 
-            st.markdown("<div style='height:.8rem'></div>", unsafe_allow_html=True)
+        # Download
+        st.markdown("""
+        <p style="font-size:.72rem;font-weight:700;letter-spacing:.7px;text-transform:uppercase;
+              color:#a1a1aa;margin-bottom:.7rem">Export</p>
+        """, unsafe_allow_html=True)
+        d1, d2, _ = st.columns([2, 2, 5])
+        with d1:
+            buf = io.BytesIO()
+            _write_excel(result, list(df_raw.columns), corrected_col_map, buf, col_map)
+            buf.seek(0)
+            st.download_button("⬇  Excel (.xlsx)", buf, "corrected_addresses.xlsx",
+                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               use_container_width=True, type="primary")
+        with d2:
+            st.download_button("⬇  CSV (.csv)", result.to_csv(index=False).encode("utf-8-sig"),
+                               "corrected_addresses.csv", "text/csv", use_container_width=True)
 
-            # Column badges
-            bdg = '<div class="badge-row">'
-            for field, label in DISPLAY_LABELS.items():
-                orig = col_map.get(field)
-                if orig:
-                    bdg += f'<span class="bdg bdg-ok">✓ {label} <span class="bdg-src">← {orig}</span></span>'
-                else:
-                    bdg += f'<span class="bdg bdg-no">— {label}</span>'
-            bdg += '</div>'
-            st.markdown(bdg, unsafe_allow_html=True)
-
-            # Bar chart
-            if any(v > 0 for v in per_field.values()):
-                with st.expander("Breakdown by field"):
-                    st.bar_chart(pd.DataFrame.from_dict(per_field, orient="index", columns=["Corrections"]),
-                                 color="#6c47ff")
-
-            # View toggle + table
-            vl, vr = st.columns([4, 3])
-            with vl:
-                st.markdown('<p style="font-size:.72rem;font-weight:700;letter-spacing:.7px;'
-                            'text-transform:uppercase;color:#a1a1aa;margin-bottom:.3rem">View</p>',
-                            unsafe_allow_html=True)
-            with vr:
-                view_mode = st.radio("v", ["Side by side", "Corrected only", "Changes only"],
-                                     horizontal=True, label_visibility="collapsed")
-
-            orig_addr = [c for c in df_raw.columns if c in col_map.values()]
-            corr_cols = list(corrected_col_map.keys())
-            other     = [c for c in df_raw.columns if c not in orig_addr]
-
-            if view_mode == "Corrected only":
-                display_df = pd.concat([df_raw[other], result[corr_cols]], axis=1)
-            elif view_mode == "Changes only":
-                mask = pd.Series(False, index=result.index)
-                for field, orig_col in col_map.items():
-                    if orig_col is None or field not in DISPLAY_LABELS: continue
-                    lbl = f"Corrected {DISPLAY_LABELS[field]}"
-                    if lbl not in result.columns: continue
-                    mask |= result[orig_col].astype(str).str.strip() != result[lbl].astype(str).str.strip()
-                display_df = result[mask]
-            else:
-                display_df = result
-
-            def highlight_changes(df):
-                s = pd.DataFrame("", index=df.index, columns=df.columns)
-                for field, orig_col in col_map.items():
-                    if field not in DISPLAY_LABELS: continue
-                    lbl = f"Corrected {DISPLAY_LABELS[field]}"
-                    if orig_col not in df.columns or lbl not in df.columns: continue
-                    changed = df[orig_col].astype(str).str.strip() != df[lbl].astype(str).str.strip()
-                    s.loc[changed, lbl]      = "background-color:#f0fdf4;color:#15803d;font-weight:600"
-                    s.loc[changed, orig_col] = "background-color:#fefce8;color:#a16207"
-                return s
-
-            st.dataframe(display_df.style.apply(highlight_changes, axis=None),
-                     use_container_width=True, height=min(44 + 36*len(display_df), 520))
-
-            st.markdown(f"""
-            <div class="legend">
-            <span><span class="ldot" style="background:#dcfce7;border:1px solid #86efac"></span>Corrected value</span>
-            <span><span class="ldot" style="background:#fef9c3;border:1px solid #fde047"></span>Original (changed)</span>
-            <span style="margin-left:auto">{len(display_df):,} of {total_rows:,} rows shown</span>
-            </div>
-            <div style="height:1.5rem"></div>
-            """, unsafe_allow_html=True)
-
-            # Download
-            st.markdown("""
-            <p style="font-size:.72rem;font-weight:700;letter-spacing:.7px;text-transform:uppercase;
-                  color:#a1a1aa;margin-bottom:.7rem">Export</p>
-            """, unsafe_allow_html=True)
-            d1, d2, _ = st.columns([2, 2, 5])
-            with d1:
-                buf = io.BytesIO()
-                _write_excel(result, list(df_raw.columns), corrected_col_map, buf, col_map)
-                buf.seek(0)
-                st.download_button("⬇  Excel (.xlsx)", buf, "corrected_addresses.xlsx",
-                                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                   use_container_width=True, type="primary")
-            with d2:
-                st.download_button("⬇  CSV (.csv)", result.to_csv(index=False).encode("utf-8-sig"),
-                                   "corrected_addresses.csv", "text/csv", use_container_width=True)
-
-            st.markdown("</div></div>", unsafe_allow_html=True)
+        st.markdown("</div></div>", unsafe_allow_html=True)
 
