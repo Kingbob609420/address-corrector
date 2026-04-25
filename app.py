@@ -520,6 +520,7 @@ with tab_single:
         state_conf,   state_method   = scores["state"]["confidence"],   scores["state"]["method"]
         country_conf, country_method = scores["country"]["confidence"], scores["country"]["method"]
         zip_conf,     zip_method     = scores["postal"]["confidence"],  scores["postal"]["method"]
+        city_conf,    city_method    = scores["city"]["confidence"],    scores["city"]["method"]
         _no_zip = not s_zip.strip()
 
         # ── 2. AI: correct spelling/format of the address (no ZIP inference yet) ─
@@ -668,9 +669,17 @@ with tab_single:
             if _m_house or _m_road:
                 _raw_addr1 = f"{_m_house} {_m_road}".strip()
                 addr1_c = correct_address_line(_raw_addr1)
-            # city → Title Case
+            # city → prefer Nominatim's value; fall back to ZIP lookup for US
             if _m_city:
-                city_c = correct_city(_m_city) or _m_city.title()
+                city_c    = correct_city(_m_city) or _m_city.title()
+                city_conf, city_method = 1.0, "map_validated"
+            elif _m_post:
+                # Nominatim didn't return a city (e.g. small towns stored as suburb)
+                # — derive canonical city name from the postcode instead
+                _zc_data = lookup_city_from_zip(_m_post)
+                if _zc_data.get("city"):
+                    city_c    = _zc_data["city"]
+                    city_conf, city_method = 1.0, "map_validated"
             # state: Nominatim returns full name ("South Carolina") → abbreviation
             if _m_state:
                 state_c = correct_state(_m_state)
@@ -728,7 +737,7 @@ with tab_single:
         field_rows = [
             ("Address", s_addr1.strip(),   addr1_c,   scores["address"]["confidence"],  scores["address"]["method"]),
             ("Addr 2",  s_addr2.strip(),   addr2_c,   scores["address2"]["confidence"], scores["address2"]["method"]),
-            ("City",    s_city.strip(),    city_c,    scores["city"]["confidence"],      scores["city"]["method"]),
+            ("City",    s_city.strip(),    city_c,    city_conf,                         city_method),
             ("State",   s_state.strip(),   state_c,   state_conf,                       state_method),
             ("ZIP",     s_zip.strip(),     zip_c,     zip_conf,                         zip_method),
             ("Country", s_country.strip(), country_c, country_conf,                     country_method),

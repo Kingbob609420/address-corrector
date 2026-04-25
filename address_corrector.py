@@ -1811,7 +1811,8 @@ def validate_address_nominatim(addr1: str, city: str, state: str, country: str, 
                 "matched_road":     addr_detail.get("road", "") or addr_detail.get("street", ""),
                 "matched_postcode": addr_detail.get("postcode", ""),
                 "matched_city":     (addr_detail.get("city") or addr_detail.get("town")
-                                     or addr_detail.get("village") or addr_detail.get("municipality") or ""),
+                                     or addr_detail.get("village") or addr_detail.get("municipality")
+                                     or addr_detail.get("suburb") or ""),
                 "matched_state":    addr_detail.get("state", ""),
                 "matched_country_code": addr_detail.get("country_code", "").upper(),
             }
